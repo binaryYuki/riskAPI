@@ -130,6 +130,14 @@ func getAllowedDomains() []string {
 	return parts
 }
 
+func handleError(c *gin.Context, statusCode int, reason string) {
+	c.JSON(statusCode, gin.H{
+		"status": "error",
+		"reason": reason,
+	})
+	c.Abort()
+}
+
 func main() {
 	// Initialize cache with default expiration of 1 hours
 	appCache = cache.New(ipCacheExpiry, 10*time.Minute)
@@ -151,10 +159,15 @@ func main() {
 		return
 	}
 
+	router.NoRoute(func(c *gin.Context) {
+		handleError(c, http.StatusNotFound, "Not Found")
+	})
+
 	corsConfig := cors.Config{
 		AllowOriginFunc: func(origin string) bool {
 			for _, domain := range allowedDomains {
-				if strings.HasSuffix(origin, "."+domain) || origin == "https://"+domain || origin == "http://"+domain {
+				//if strings.HasSuffix(origin, "."+domain) || origin == "https://"+domain || origin == "http://"+domain {
+				if strings.HasSuffix(origin, "."+domain) || origin == "https://"+domain {
 					return true
 				}
 			}
@@ -242,9 +255,9 @@ func checkIPHandler(c *gin.Context) {
 		return
 	}
 
-	// IP is safe
-	c.JSON(http.StatusOK, IPCheckResponse{
-		Status: "ok",
+	c.JSON(http.StatusOK, gin.H{
+		"status": "ok",
+		"reason": "",
 	})
 }
 
