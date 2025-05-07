@@ -28,4 +28,4 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ secrets.DOCKER_USERNAME }}/risk-api:${{ github.run_id }}-${{ github.event.head_commit.timestamp }}
+          tags: ${{ secrets.DOCKER_USERNAME }}/risk-api:${{ github.run_id }}
