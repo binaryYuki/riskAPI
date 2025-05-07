@@ -130,10 +130,15 @@ func getAllowedDomains() []string {
 	return parts
 }
 
+type ErrorResponse struct {
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
 func handleError(c *gin.Context, statusCode int, reason string) {
-	c.JSON(statusCode, gin.H{
-		"status": "error",
-		"reason": reason,
+	c.JSON(statusCode, ErrorResponse{
+		Status: "error",
+		Reason: reason,
 	})
 	c.Abort()
 }
@@ -188,7 +193,7 @@ func main() {
 	router.POST("/filter-proxies", func(c *gin.Context) {
 		var proxies []Proxy
 		if err := c.ShouldBindJSON(&proxies); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Request body is invalid."})
 			return
 		}
 
