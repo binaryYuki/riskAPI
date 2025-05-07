@@ -5,6 +5,8 @@
 # https://docs.docker.com/go/build-context-dockerignore/
 .idea
 .idea/**
+README.md
+README_cn.md
 **/.DS_Store
 **/.classpath
 **/.dockerignore
@@ -33,4 +35,3 @@ tmp/**
 **/secrets.dev.yaml
 **/values.dev.yaml
 LICENSE
-README.md
