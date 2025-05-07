@@ -19,7 +19,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// 缺失的正则表达式定义
 var (
 	ipRegex   = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}$`)
 	cidrRegex = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}$`)
@@ -123,7 +122,7 @@ func getAllowedDomains() []string {
 	if env == "" {
 		return []string{"catyuki.com", "tzpro.xyz"}
 	}
-	// 支持逗号分隔
+	// allow separate by comma
 	parts := strings.Split(env, ",")
 	for i, p := range parts {
 		parts[i] = strings.TrimSpace(p)
@@ -155,7 +154,6 @@ func main() {
 	corsConfig := cors.Config{
 		AllowOriginFunc: func(origin string) bool {
 			for _, domain := range allowedDomains {
-				// 支持 https/http
 				if strings.HasSuffix(origin, "."+domain) || origin == "https://"+domain || origin == "http://"+domain {
 					return true
 				}
