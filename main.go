@@ -101,7 +101,7 @@ var (
 // RateLimitMiddleware implements rate limiting for the API
 func RateLimitMiddleware() gin.HandlerFunc {
 	// Create a new rate limiter allowing 45 requests per minute
-	limiter := rate.NewLimiter(rate.Limit(4500000.0/60.0), 45) // 45 requests per minute
+	limiter := rate.NewLimiter(rate.Limit(45.0/60.0), 45) // 45 requests per minute
 	_ = limiter
 
 	return func(c *gin.Context) {
