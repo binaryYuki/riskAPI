@@ -68,15 +68,14 @@ type RSSFeed struct {
 	} `xml:"channel"`
 }
 
-// IPCheckResponse is the response for the IP check API
-type IPCheckResponse struct {
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+type Response struct {
+	Status  string      `json:"status"`
+	Message interface{} `json:"message,omitempty"`
 }
 
-type Response struct {
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+type StatusCountMsg struct {
+	Timestamp int64 `json:"timestamp"`
+	Count     int   `json:"total_ip_count"`
 }
 
 var (
@@ -112,9 +111,9 @@ func RateLimitMiddleware() gin.HandlerFunc {
 
 	return func(c *gin.Context) {
 		if !limiter.Allow() {
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"status":  "error",
-				"message": "Rate limit exceeded. Maximum 45 requests per minute allowed.",
+			c.JSON(http.StatusTooManyRequests, Response{
+				"error",
+				"Rate limit exceeded. Maximum 45 requests per minute allowed.",
 			})
 			c.Abort()
 			return
@@ -229,9 +228,12 @@ func main() {
 		count := len(riskyIPs)
 		riskyIPsMutex.RUnlock()
 
-		c.JSON(http.StatusOK, gin.H{
-			"status":         "running",
-			"risky_ip_count": count,
+		c.JSON(http.StatusOK, Response{
+			Status: "ok",
+			Message: StatusCountMsg{
+				Timestamp: time.Now().Unix(),
+				Count:     count,
+			},
 		})
 	})
 
@@ -249,7 +251,7 @@ func checkIPHandler(c *gin.Context) {
 
 	// Validate IP format
 	if !isIPAddress(ip) {
-		c.JSON(http.StatusBadRequest, IPCheckResponse{
+		c.JSON(http.StatusBadRequest, Response{
 			Status:  "error",
 			Message: "Invalid IP address format",
 		})
@@ -265,7 +267,7 @@ func checkIPHandler(c *gin.Context) {
 		}
 		reasonMapMutex.RUnlock()
 
-		c.JSON(http.StatusOK, IPCheckResponse{
+		c.JSON(http.StatusOK, Response{
 			Status:  "banned",
 			Message: message,
 		})
