@@ -22,7 +22,7 @@ func TestHandleErrorReturnsCorrectJSONResponse(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.JSONEq(t, `{"status":"error","reason":"bad request"}`, w.Body.String())
+	assert.JSONEq(t, `{"status":"error","message":"bad request"}`, w.Body.String())
 }
 
 func TestIPCheckReturnsErrorForInvalidIP(t *testing.T) {
@@ -35,13 +35,13 @@ func TestIPCheckReturnsErrorForInvalidIP(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.JSONEq(t, `{"status":"error","reason":"Invalid IP address format"}`, w.Body.String())
+	assert.JSONEq(t, `{"status":"error","message":"Invalid IP address format"}`, w.Body.String())
 }
 
 func TestIPCheckReturnsBannedForRiskyIP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	riskyIPs["192.168.1.1"] = true
-	reasonMap["192.168.1.1"] = "Test reason"
+	reasonMap["192.168.1.1"] = "Test message"
 
 	router := gin.Default()
 	router.GET("/api/v1/ip/:ip", checkIPHandler)
@@ -51,7 +51,7 @@ func TestIPCheckReturnsBannedForRiskyIP(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.JSONEq(t, `{"status":"banned","reason":"Test reason"}`, w.Body.String())
+	assert.JSONEq(t, `{"status":"banned","message":"Test message"}`, w.Body.String())
 }
 
 func TestIPCheckReturnsOKForSafeIP(t *testing.T) {
@@ -64,7 +64,7 @@ func TestIPCheckReturnsOKForSafeIP(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.JSONEq(t, `{"status":"ok","reason":""}`, w.Body.String())
+	assert.JSONEq(t, `{"status":"ok"}`, w.Body.String())
 }
 
 func TestFilterProxiesExcludesRiskyIPs(t *testing.T) {
