@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -69,8 +70,13 @@ type RSSFeed struct {
 
 // IPCheckResponse is the response for the IP check API
 type IPCheckResponse struct {
-	Status string `json:"status"`
-	Reason string `json:"reason,omitempty"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
+type Response struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
 }
 
 var (
@@ -130,15 +136,10 @@ func getAllowedDomains() []string {
 	return parts
 }
 
-type ErrorResponse struct {
-	Status string `json:"status"`
-	Reason string `json:"reason"`
-}
-
-func handleError(c *gin.Context, statusCode int, reason string) {
-	c.JSON(statusCode, ErrorResponse{
-		Status: "error",
-		Reason: reason,
+func handleError(c *gin.Context, statusCode int, message string) {
+	c.JSON(statusCode, Response{
+		Status:  "error",
+		Message: message,
 	})
 	c.Abort()
 }
@@ -193,15 +194,26 @@ func main() {
 	router.POST("/filter-proxies", func(c *gin.Context) {
 		var proxies []Proxy
 		if err := c.ShouldBindJSON(&proxies); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Request body is invalid."})
+			c.JSON(http.StatusBadRequest, Response{"error", "Request body is invalid."})
 			return
 		}
 
 		// Process proxies
 		nonRiskyProxies := processProxies(proxies)
-		c.JSON(http.StatusOK, gin.H{
+		filteredData := gin.H{
 			"filtered_count": len(proxies) - len(nonRiskyProxies),
 			"proxies":        nonRiskyProxies,
+		}
+
+		message, err := json.Marshal(filteredData)
+		if err != nil {
+			handleError(c, http.StatusInternalServerError, "Failed to marshal response")
+			return
+		}
+
+		c.JSON(http.StatusOK, Response{
+			Status:  "ok",
+			Message: string(message),
 		})
 	})
 
@@ -238,8 +250,8 @@ func checkIPHandler(c *gin.Context) {
 	// Validate IP format
 	if !isIPAddress(ip) {
 		c.JSON(http.StatusBadRequest, IPCheckResponse{
-			Status: "error",
-			Reason: "Invalid IP address format",
+			Status:  "error",
+			Message: "Invalid IP address format",
 		})
 		return
 	}
@@ -247,22 +259,22 @@ func checkIPHandler(c *gin.Context) {
 	// Check if IP is risky
 	if isRiskyIP(ip) {
 		reasonMapMutex.RLock()
-		reason := reasonMap[ip]
-		if reason == "" {
-			reason = "IP found in risk database"
+		message := reasonMap[ip]
+		if message == "" {
+			message = "IP found in risk database"
 		}
 		reasonMapMutex.RUnlock()
 
 		c.JSON(http.StatusOK, IPCheckResponse{
-			Status: "banned",
-			Reason: reason,
+			Status:  "banned",
+			Message: message,
 		})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"status": "ok",
-		"reason": "",
+	c.JSON(http.StatusOK, Response{
+		Status:  "ok",
+		Message: "",
 	})
 }
 
@@ -436,8 +448,6 @@ func processProjectHoneypotRSS(body io.Reader, ipChan chan<- string) {
 			ipStr := strings.TrimSpace(strings.TrimPrefix(item.Title, "IP:"))
 			if ipRegex.MatchString(ipStr) {
 				ipChan <- ipStr
-
-				// Store reason for this IP
 				reasonMapMutex.Lock()
 				reasonMap[ipStr] = "ProjectHoneypot: " + item.Description
 				reasonMapMutex.Unlock()
@@ -465,7 +475,7 @@ func processSpamhausList(body io.Reader, ipChan chan<- string) {
 			// Store reason if available
 			if len(parts) > 1 {
 				reasonMapMutex.Lock()
-				reasonMap[parts[0]] = "Spamhaus: " + strings.TrimSpace(parts[1])
+				reasonMap[parts[0]] = "Spammers: " + strings.TrimSpace(parts[1])
 				reasonMapMutex.Unlock()
 			}
 		}
