@@ -64,7 +64,7 @@ func TestIPCheckReturnsOKForSafeIP(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.JSONEq(t, `{"status":"ok"}`, w.Body.String())
+	assert.JSONEq(t, `{"status":"ok", "message":""}`, w.Body.String())
 }
 
 func TestFilterProxiesExcludesRiskyIPs(t *testing.T) {
