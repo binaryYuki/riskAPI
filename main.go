@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -100,8 +99,62 @@ var (
 		"https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level4.netset",
 		"https://blocklist.greensnow.co/greensnow.txt",
 		"https://checktor.483300.xyz/exit-addresses",
+		"https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/8.txt",
+		"https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/7.txt",
+		"https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/6.txt",
+		"https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/5.txt",
+		"https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/4.txt",
+		"https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/3.txt",
+		"https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/2.txt",
 	}
 )
+
+// isBogonOrPrivateIP Check if the given IP is a bogon or private IP
+// Bogon IPs are addresses that are not routable on the public internet.
+// Private IPs are reserved for use within private networks.
+func isBogonOrPrivateIP(ip string) bool {
+	ipAddr := net.ParseIP(ip)
+	if ipAddr == nil {
+		return false
+	}
+
+	privateIPBlocks := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",    // Loopback
+		"169.254.0.0/16", // Link-local
+	}
+
+	for _, cidr := range privateIPBlocks {
+		_, ipNet, _ := net.ParseCIDR(cidr)
+		if ipNet.Contains(ipAddr) {
+			return true
+		}
+	}
+
+	// Bogon IPs are IP addresses that are not allocated to any organization.
+	bogonIPBlocks := []string{
+		"0.0.0.0/8",
+		"100.64.0.0/10",
+		"192.0.0.0/24",
+		"192.0.2.0/24",
+		"198.18.0.0/15",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"240.0.0.0/4",
+		"255.255.255.255/32",
+	}
+
+	for _, cidr := range bogonIPBlocks {
+		_, ipNet, _ := net.ParseCIDR(cidr)
+		if ipNet.Contains(ipAddr) {
+			return true
+		}
+	}
+
+	return false
+}
 
 // RateLimitMiddleware implements rate limiting for the API
 func RateLimitMiddleware() gin.HandlerFunc {
@@ -204,15 +257,9 @@ func main() {
 			"proxies":        nonRiskyProxies,
 		}
 
-		message, err := json.Marshal(filteredData)
-		if err != nil {
-			handleError(c, http.StatusInternalServerError, "Failed to marshal response")
-			return
-		}
-
 		c.JSON(http.StatusOK, Response{
 			Status:  "ok",
-			Message: string(message),
+			Message: filteredData,
 		})
 	})
 
@@ -258,14 +305,47 @@ func checkIPHandler(c *gin.Context) {
 		return
 	}
 
+	// validate private/bogon ips
+	if isBogonOrPrivateIP(ip) {
+		c.JSON(http.StatusUnprocessableEntity, Response{
+			Status:  "error",
+			Message: "This is a private IP address, please check if you are calling this api correctly.",
+		})
+		return
+	}
+
 	// Check if IP is risky
 	if isRiskyIP(ip) {
+		// 先查单个 IP
 		reasonMapMutex.RLock()
 		message := reasonMap[ip]
+		reasonMapMutex.RUnlock()
+
+		// 如果查不到，再遍历 CIDR
+		if message == "" {
+			ipAddr := net.ParseIP(ip)
+			if ipAddr != nil {
+				riskyIPsMutex.RLock()
+				for cidr := range riskyIPs {
+					if strings.Contains(cidr, "/") {
+						_, ipNet, err := net.ParseCIDR(cidr)
+						if err == nil && ipNet.Contains(ipAddr) {
+							reasonMapMutex.RLock()
+							message = reasonMap[cidr]
+							reasonMapMutex.RUnlock()
+							if message != "" {
+								break
+							}
+						}
+					}
+				}
+				riskyIPsMutex.RUnlock()
+			}
+		}
+
 		if message == "" {
 			message = "IP found in risk database"
 		}
-		reasonMapMutex.RUnlock()
 
 		c.JSON(http.StatusOK, Response{
 			Status:  "banned",
@@ -469,7 +549,7 @@ func processSpamhausList(body io.Reader, ipChan chan<- string) {
 			continue
 		}
 
-		// Format: "192.168.0.0/24 ; SBL12345 Some description"
+		// Format: "192.168.0.0/24 ;
 		parts := strings.SplitN(line, " ", 2)
 		if len(parts) > 0 && (ipRegex.MatchString(parts[0]) || cidrRegex.MatchString(parts[0])) {
 			ipChan <- parts[0]
@@ -664,6 +744,8 @@ func getSourceIdentifier(url string) string {
 		return "Bruteforce Blocker"
 	} else if strings.Contains(url, "dan.me.uk") {
 		return "Dan.me.uk Tor List"
+	} else if strings.Contains(url, "stamparm") {
+		return "IPSum Wall of Shame"
 	}
 
 	// Generic fallback
@@ -689,13 +771,11 @@ func processProxies(proxies []Proxy) []Proxy {
 
 			// Check if server is an IP address
 			if isIPAddress(p.Server) {
-				if isRiskyIP(p.Server) {
-					fmt.Printf("Found risky IP node, excluded: %s (%s)\n", p.Name, p.Server)
+				if isRiskyIP(p.Server) || isBogonOrPrivateIP(p.Server) {
 					return
 				}
 			}
-
-			// If not risky, add to results
+			// If not risky or bogon, add to results
 			resultMutex.Lock()
 			nonRiskyProxies = append(nonRiskyProxies, p)
 			resultMutex.Unlock()
@@ -703,7 +783,6 @@ func processProxies(proxies []Proxy) []Proxy {
 	}
 
 	wg.Wait()
-	fmt.Printf("Processing complete, %d non-risky IP nodes remaining\n", len(nonRiskyProxies))
 	return nonRiskyProxies
 }
 
