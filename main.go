@@ -72,6 +72,12 @@ type Response struct {
 	Message interface{} `json:"message,omitempty"`
 }
 
+type ResponseWithIP struct {
+	Status  string      `json:"status"`
+	Message interface{} `json:"message,omitempty"`
+	IP      string      `json:"ip,omitempty"`
+}
+
 type StatusCountMsg struct {
 	Timestamp int64 `json:"timestamp"`
 	Count     int   `json:"total_ip_count"`
@@ -269,6 +275,8 @@ func main() {
 		ipCheckGroup.GET("/:ip", checkIPHandler)
 		ipCheckGroup.POST("/:ip", checkIPHandler)
 	}
+
+	router.GET("/api/v1/ip", checkRequestIPHandler)
 
 	router.GET("/api/status", func(c *gin.Context) {
 		riskyIPsMutex.RLock()
@@ -514,6 +522,60 @@ func fetchIPList(apiURL string, config Config, ipChan chan<- string) {
 	}
 
 	fmt.Printf("Failed to fetch IP list from %s after %d attempts\n", apiURL, config.Retries)
+}
+
+func extractIPFromRequest(c *gin.Context) string {
+
+	ip := c.ClientIP()
+	if ip == "" {
+		ip = c.RemoteIP()
+	}
+	return ip
+}
+
+func checkRequestIPHandler(c *gin.Context) {
+	ip := extractIPFromRequest(c)
+
+	if ip == "::1" || ip == "127.0.0.1" {
+		c.JSON(http.StatusOK, ResponseWithIP{
+			Status:  "ok",
+			Message: "Seems like you are using localhost, please check if you are calling this api correctly.",
+			IP:      ip,
+		})
+		return
+	}
+
+	if !isIPAddress(ip) {
+		c.JSON(http.StatusBadRequest, "Invalid IP address format")
+		return
+	}
+
+	if isBogonOrPrivateIP(ip) {
+		c.JSON(http.StatusUnprocessableEntity, ResponseWithIP{
+			"ok",
+			"This is a private IP address, please check if you are calling this api correctly.",
+			ip,
+		})
+		return
+	}
+
+	if isRiskyIP(ip) {
+		reasonMapMutex.RLock()
+		message := reasonMap[ip]
+		reasonMapMutex.RUnlock()
+		c.JSON(http.StatusOK, ResponseWithIP{
+			"banned",
+			message,
+			ip,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, ResponseWithIP{
+		"ok",
+		"",
+		ip,
+	})
 }
 
 // processProjectHoneypotRSS processes the Project Honeypot RSS feed
