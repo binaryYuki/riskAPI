@@ -14,6 +14,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      # 安装 Go
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.23
+
+      # 下载依赖
+      - name: Download Go modules
+        run: go mod download
+
+      # 编译 Go 程序
+      - name: Build Go project
+        run: go build -v ./...
+
+      # 运行测试
+      - name: Run Go tests
+        run: go test -v ./...
+
       # 设置 QEMU
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

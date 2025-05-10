@@ -24,6 +24,12 @@ tmp/**
 **/*.*proj.user
 **/*.dbmdl
 **/*.jfm
+.git
+.github
+*.md
+*.log
+*.test
+vendor/
 **/bin
 **/charts
 **/docker-compose*
