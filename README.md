@@ -12,7 +12,7 @@
     - Filter a list of proxies, removing risky IPs
     - Check service status
 - CORS support
-- Rate limiting support
+- Rate limiting support !!Deprecated --leave it to your rev proxy!
 
 ## Tech Stack
 - **Language**: Go

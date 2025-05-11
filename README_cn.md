@@ -10,7 +10,8 @@ Risky IP Filter 是一个基于 Go 的服务，用于检测和过滤风险 IP �
     - 过滤代理列表，移除风险 IP
     - 查看服务状态
 - 支持跨域请求 (CORS)
-- 支持速率限制 (Rate Limiting)
+
+[//]: # (- 支持速率限制 &#40;Rate Limiting&#41;)
 
 ## 技术栈
 - **语言**: Go
