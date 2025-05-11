@@ -162,25 +162,6 @@ func isBogonOrPrivateIP(ip string) bool {
 	return false
 }
 
-// RateLimitMiddleware implements rate limiting for the API
-func RateLimitMiddleware() gin.HandlerFunc {
-	// Create a new rate limiter allowing 45 requests per minute
-	limiter := rate.NewLimiter(rate.Limit(45.0/60.0), 45) // 45 requests per minute
-	_ = limiter
-
-	return func(c *gin.Context) {
-		if !limiter.Allow() {
-			c.JSON(http.StatusTooManyRequests, Response{
-				"error",
-				"Rate limit exceeded. Maximum 45 requests per minute allowed.",
-			})
-			c.Abort()
-			return
-		}
-		c.Next()
-	}
-}
-
 func getAllowedDomains() []string {
 	env := os.Getenv("ALLOWED_CORS")
 	if env == "" {
@@ -241,9 +222,6 @@ func main() {
 		AllowHeaders: []string{"Origin", "Content-Type", "Authorization"},
 	}
 	router.Use(cors.New(corsConfig))
-
-	// Apply rate limiting to API endpoints
-	router.Use(RateLimitMiddleware())
 
 	// Start background IP list updater
 	go updateIPListsPeriodically(config)
