@@ -5,8 +5,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -16,7 +18,6 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
-	"golang.org/x/time/rate"
 )
 
 var (
@@ -24,36 +25,50 @@ var (
 	cidrRegex = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}$`)
 )
 
+// Data structures for storing risky IPs
 var (
-	appCache       *cache.Cache
-	_              *rate.Limiter
-	reasonMap      = make(map[string]string)
-	reasonMapMutex sync.RWMutex
+	riskySingleIPs map[string]bool   // Stores single IPs for quick lookup
+	riskyCIDRInfo  []CIDRInfo        // Stores parsed CIDR info
+	reasonMap      map[string]string // Stores reasons for IPs/CIDRs
+	riskyDataMutex sync.RWMutex      // Protects riskySingleIPs, riskyCIDRInfo, and reasonMap
 
-	ipCacheKey      = "risky_ip_list"
+	appCache *cache.Cache
+
+	ipCacheKey      = "risky_ip_list_entries" // Cache key for raw IP/CIDR strings
 	ipCacheExpiry   = 6 * time.Hour
 	updateFrequency = 1 * time.Hour
 )
+
+// CIDRInfo stores a parsed CIDR network and its original string representation
+type CIDRInfo struct {
+	Net          *net.IPNet
+	OriginalCIDR string
+}
+
+// IPAssociation is used to pass IP/CIDR entries and their reasons from fetchers
+type IPAssociation struct {
+	Entry  string // IP or CIDR string
+	Reason string
+}
 
 // Config stores application configuration
 type Config struct {
 	Timeout     int `json:"timeout"`
 	Retries     int `json:"retries"`
 	RetryDelay  int `json:"retry_delay"`
-	Concurrency int `json:"concurrency"`
+	Concurrency int `json:"concurrency"` // Note: This Concurrency is not currently used to limit fetcher goroutines
 }
 
 // Proxy represents a proxy configuration
 type Proxy struct {
 	Name   string `json:"name"`
 	Server string `json:"server"`
-	// Add other fields as needed
 }
 
-// IPCache represents the cached IP data structure
-type IPCache struct {
+// IPCacheData represents the cached IP data structure (list of IP/CIDR strings)
+type IPCacheData struct {
 	Timestamp int64    `json:"timestamp"`
-	IPs       []string `json:"ips"`
+	Entries   []string `json:"entries"` // Raw IP/CIDR strings
 }
 
 // RSSFeed is a struct for parsing Project Honeypot RSS data
@@ -84,9 +99,7 @@ type StatusCountMsg struct {
 }
 
 var (
-	riskyIPs      = make(map[string]bool)
-	riskyIPsMutex sync.RWMutex
-	ipListAPIs    = []string{
+	ipListAPIs = []string{
 		"https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt",
 		"https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt",
 		"https://check.torproject.org/exit-addresses",
@@ -115,59 +128,52 @@ var (
 	}
 )
 
-// isBogonOrPrivateIP Check if the given IP is a bogon or private IP
-// Bogon IPs are addresses that are not routable on the public internet.
-// Private IPs are reserved for use within private networks.
 func isBogonOrPrivateIP(ip string) bool {
 	ipAddr := net.ParseIP(ip)
 	if ipAddr == nil {
-		return false
+		return false // Invalid IP format cannot be bogon/private in this context
 	}
 
 	privateIPBlocks := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
+		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", // RFC 1918
 		"127.0.0.0/8",    // Loopback
 		"169.254.0.0/16", // Link-local
 	}
 
 	for _, cidr := range privateIPBlocks {
-		_, ipNet, _ := net.ParseCIDR(cidr)
-		if ipNet.Contains(ipAddr) {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err == nil && ipNet.Contains(ipAddr) {
 			return true
 		}
 	}
 
-	// Bogon IPs are IP addresses that are not allocated to any organization.
 	bogonIPBlocks := []string{
-		"0.0.0.0/8",
-		"100.64.0.0/10",
-		"192.0.0.0/24",
-		"192.0.2.0/24",
-		"198.18.0.0/15",
-		"198.51.100.0/24",
-		"203.0.113.0/24",
-		"240.0.0.0/4",
-		"255.255.255.255/32",
+		"0.0.0.0/8",          // Current network (only valid as source address)
+		"100.64.0.0/10",      // Shared Address Space
+		"192.0.0.0/24",       // IANA IPv4 Special Purpose Address Registry
+		"192.0.2.0/24",       // TEST-NET-1, documentation and examples
+		"198.18.0.0/15",      // Network Interconnect Device Benchmark Testing
+		"198.51.100.0/24",    // TEST-NET-2, documentation and examples
+		"203.0.113.0/24",     // TEST-NET-3, documentation and examples
+		"224.0.0.0/4",        // Multicast
+		"240.0.0.0/4",        // Reserved for Future Use
+		"255.255.255.255/32", // Broadcast
 	}
 
 	for _, cidr := range bogonIPBlocks {
-		_, ipNet, _ := net.ParseCIDR(cidr)
-		if ipNet.Contains(ipAddr) {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err == nil && ipNet.Contains(ipAddr) {
 			return true
 		}
 	}
-
 	return false
 }
 
 func getAllowedDomains() []string {
 	env := os.Getenv("ALLOWED_CORS")
 	if env == "" {
-		return []string{"catyuki.com", "tzpro.xyz"}
+		return []string{"catyuki.com", "tzpro.xyz"} // Default allowed domains
 	}
-	// allow separate by comma
 	parts := strings.Split(env, ",")
 	for i, p := range parts {
 		parts[i] = strings.TrimSpace(p)
@@ -184,24 +190,26 @@ func handleError(c *gin.Context, statusCode int, message string) {
 }
 
 func main() {
-	// Initialize cache with default expiration of 1 hours
 	appCache = cache.New(ipCacheExpiry, 10*time.Minute)
+	riskySingleIPs = make(map[string]bool)
+	riskyCIDRInfo = make([]CIDRInfo, 0)
+	reasonMap = make(map[string]string)
+
 	allowedDomains := getAllowedDomains()
 
-	// Default configuration
 	config := Config{
-		Timeout:     10000,
+		Timeout:     10000, // milliseconds
 		Retries:     3,
-		RetryDelay:  2000,
-		Concurrency: 10,
+		RetryDelay:  2000, // milliseconds
+		Concurrency: 10,   // Max concurrent goroutines for proxy filtering, not IP list fetching
 	}
 
-	// Initialize Gin router
 	router := gin.Default()
 
-	err := router.SetTrustedProxies([]string{"10.42.0.0/16", "10.0.0.0/16"})
+	// It's important to set trusted proxies if running behind a reverse proxy
+	err := router.SetTrustedProxies([]string{"10.42.0.0/16", "10.0.0.0/16", "172.16.0.0/12", "fc00::/7"})
 	if err != nil {
-		return
+		log.Fatalf("Failed to set trusted proxies: %v", err)
 	}
 
 	router.NoRoute(func(c *gin.Context) {
@@ -210,56 +218,57 @@ func main() {
 
 	corsConfig := cors.Config{
 		AllowOriginFunc: func(origin string) bool {
+			// For security, ensure origin is well-formed, e.g., starts with https://
+			if !strings.HasPrefix(origin, "https://") {
+				// Allow localhost for development if desired
+				// is strings.HasPrefix(origin, "http://localhost") { return true }
+				// return false
+			}
 			for _, domain := range allowedDomains {
-				//if strings.HasSuffix(origin, "."+domain) || origin == "https://"+domain || origin == "http://"+domain {
-				if strings.HasSuffix(origin, "."+domain) || origin == "https://"+domain {
+				// Allow exact match or subdomains
+				if origin == "https://"+domain || strings.HasSuffix(origin, "."+domain) {
 					return true
 				}
 			}
 			return false
 		},
-		AllowMethods: []string{"GET", "POST"},
-		AllowHeaders: []string{"Origin", "Content-Type", "Authorization"},
+		AllowMethods:     []string{"GET", "POST", "OPTIONS"}, // OPTIONS is needed for preflight requests
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
 	}
 	router.Use(cors.New(corsConfig))
 
-	// Start background IP list updater
 	go updateIPListsPeriodically(config)
 
-	// API endpoints
 	router.POST("/filter-proxies", func(c *gin.Context) {
 		var proxies []Proxy
 		if err := c.ShouldBindJSON(&proxies); err != nil {
 			c.JSON(http.StatusBadRequest, Response{"error", "Request body is invalid."})
 			return
 		}
-
-		// Process proxies
-		nonRiskyProxies := processProxies(proxies)
+		nonRiskyProxies := processProxies(proxies, config.Concurrency) // Pass concurrency limit
 		filteredData := gin.H{
 			"filtered_count": len(proxies) - len(nonRiskyProxies),
 			"proxies":        nonRiskyProxies,
 		}
-
 		c.JSON(http.StatusOK, Response{
 			Status:  "ok",
 			Message: filteredData,
 		})
 	})
 
-	// New IP check endpoint with both GET and POST support
 	ipCheckGroup := router.Group("/api/v1/ip")
 	{
 		ipCheckGroup.GET("/:ip", checkIPHandler)
 		ipCheckGroup.POST("/:ip", checkIPHandler)
 	}
-
-	router.GET("/api/v1/ip", checkRequestIPHandler)
+	router.GET("/api/v1/ip", checkRequestIPHandler) // Checks the request's source IP
 
 	router.GET("/api/status", func(c *gin.Context) {
-		riskyIPsMutex.RLock()
-		count := len(riskyIPs)
-		riskyIPsMutex.RUnlock()
+		riskyDataMutex.RLock()
+		count := len(riskySingleIPs) + len(riskyCIDRInfo)
+		riskyDataMutex.RUnlock()
 
 		c.JSON(http.StatusOK, Response{
 			Status: "ok",
@@ -270,593 +279,506 @@ func main() {
 		})
 	})
 
-	// Start server
 	fmt.Println("Starting Risky IP Filter server on :8080")
-	err = router.Run(":8080")
-	if err != nil {
-		return
+	if err := router.Run(":8080"); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
 	}
 }
 
-// checkIPHandler handles requests to check if an IP is risky
 func checkIPHandler(c *gin.Context) {
 	ip := c.Param("ip")
-
-	// Validate IP format
 	if !isIPAddress(ip) {
-		c.JSON(http.StatusBadRequest, Response{
-			Status:  "error",
-			Message: "Invalid IP address format",
-		})
+		c.JSON(http.StatusBadRequest, Response{Status: "error", Message: "Invalid IP address format"})
 		return
 	}
-
-	// validate private/bogon ips
 	if isBogonOrPrivateIP(ip) {
-		c.JSON(http.StatusUnprocessableEntity, Response{
-			Status:  "error",
-			Message: "This is a private IP address, please check if you are calling this api correctly.",
-		})
+		c.JSON(http.StatusUnprocessableEntity, Response{Status: "error", Message: "This is a private or bogon IP address."})
 		return
 	}
 
-	// Check if IP is risky
-	if isRiskyIP(ip) {
-		// 先查单个 IP
-		reasonMapMutex.RLock()
-		message := reasonMap[ip]
-		reasonMapMutex.RUnlock()
-
-		// 如果查不到，再遍历 CIDR
-		if message == "" {
-			ipAddr := net.ParseIP(ip)
-			if ipAddr != nil {
-				riskyIPsMutex.RLock()
-				for cidr := range riskyIPs {
-					if strings.Contains(cidr, "/") {
-						_, ipNet, err := net.ParseCIDR(cidr)
-						if err == nil && ipNet.Contains(ipAddr) {
-							reasonMapMutex.RLock()
-							message = reasonMap[cidr]
-							reasonMapMutex.RUnlock()
-							if message != "" {
-								break
-							}
-						}
-					}
-				}
-				riskyIPsMutex.RUnlock()
-			}
-		}
-
-		if message == "" {
-			message = "IP found in risk database"
-		}
-
-		c.JSON(http.StatusOK, Response{
-			Status:  "banned",
-			Message: message,
-		})
+	risky, reason := getRiskStatusAndReason(ip)
+	if risky {
+		c.JSON(http.StatusOK, Response{Status: "banned", Message: reason})
 		return
 	}
-
-	c.JSON(http.StatusOK, Response{
-		Status:  "ok",
-		Message: "",
-	})
-}
-
-// updateIPListsPeriodically updates the risky IP lists at regular intervals
-func updateIPListsPeriodically(config Config) {
-	// Try to load from cache first
-	if cachedData, found := appCache.Get(ipCacheKey); found {
-		if ipCache, ok := cachedData.(IPCache); ok {
-			loadIPsFromCache(ipCache)
-			fmt.Println("Loaded IPs from cache")
-		}
-	}
-
-	// Initial update
-	updateIPLists(config)
-
-	// Schedule periodic updates
-	ticker := time.NewTicker(updateFrequency)
-	for range ticker.C {
-		updateIPLists(config)
-	}
-}
-
-// loadIPsFromCache loads IPs from cache into the riskyIPs map
-func loadIPsFromCache(ipCache IPCache) {
-	riskyIPsMutex.Lock()
-	defer riskyIPsMutex.Unlock()
-
-	riskyIPs = make(map[string]bool, len(ipCache.IPs))
-	for _, ip := range ipCache.IPs {
-		riskyIPs[ip] = true
-	}
-}
-
-// updateIPLists fetches and updates the risky IP lists from all sources
-func updateIPLists(config Config) {
-	fmt.Println("Starting IP lists update...")
-
-	var wg sync.WaitGroup
-	ipChan := make(chan string, 1000)
-
-	// Launch goroutines to fetch IPs from each API
-	for _, api := range ipListAPIs {
-		wg.Add(1)
-		go func(apiURL string) {
-			defer wg.Done()
-			fetchIPList(apiURL, config, ipChan)
-		}(api)
-	}
-
-	// Launch a goroutine to close the channel when all fetchers are done
-	go func() {
-		wg.Wait()
-		close(ipChan)
-	}()
-
-	// Collect all IPs
-	newRiskyIPs := make(map[string]bool)
-	for ip := range ipChan {
-		if ip != "" {
-			newRiskyIPs[ip] = true
-		}
-	}
-
-	// Only update if we have some data
-	if len(newRiskyIPs) > 0 {
-		riskyIPsMutex.Lock()
-		riskyIPs = newRiskyIPs
-		riskyIPsMutex.Unlock()
-
-		// Update cache
-		ipList := make([]string, 0, len(newRiskyIPs))
-		for ip := range newRiskyIPs {
-			ipList = append(ipList, ip)
-		}
-
-		appCache.Set(ipCacheKey, IPCache{
-			Timestamp: time.Now().Unix(),
-			IPs:       ipList,
-		}, ipCacheExpiry)
-
-		fmt.Printf("Successfully updated risky IP list: %d records\n", len(newRiskyIPs))
-	} else {
-		fmt.Println("Warning: No IP data obtained from any source")
-	}
-}
-
-// fetchIPList retrieves IP lists from a given API URL
-func fetchIPList(apiURL string, config Config, ipChan chan<- string) {
-	sourceId := getSourceIdentifier(apiURL)
-	client := &http.Client{
-		Timeout: time.Duration(config.Timeout) * time.Millisecond,
-	}
-
-	var retries int
-	for retries < config.Retries {
-		req, err := http.NewRequest("GET", apiURL, nil)
-		if err != nil {
-			fmt.Printf("Error creating request for %s: %s\n", apiURL, err)
-			retries++
-			time.Sleep(time.Duration(config.RetryDelay*retries) * time.Millisecond)
-			continue
-		}
-
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-		resp, err := client.Do(req)
-		if err != nil {
-			fmt.Printf("Error fetching IP list from %s (try %d/%d): %s\n",
-				apiURL, retries+1, config.Retries, err)
-			retries++
-			time.Sleep(time.Duration(config.RetryDelay*retries) * time.Millisecond)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			fmt.Printf("HTTP error from %s: %d\n", apiURL, resp.StatusCode)
-			err := resp.Body.Close()
-			if err != nil {
-				return
-			}
-			retries++
-			time.Sleep(time.Duration(config.RetryDelay*retries) * time.Millisecond)
-			continue
-		}
-
-		// Process based on URL and content type
-		if strings.Contains(apiURL, "projecthoneypot.org") {
-			// Handle Project Honeypot RSS feed
-			processProjectHoneypotRSS(resp.Body, ipChan)
-		} else if strings.Contains(apiURL, "spamhaus.org/drop") {
-			// Handle Spamhaus DROP list format
-			processSpamhausList(resp.Body, ipChan)
-		} else if strings.Contains(apiURL, "torproject.org/torbulkexitlist") {
-			// Handle Tor bulk exit list format
-			processTorBulkExitList(resp.Body, ipChan)
-		} else if strings.Contains(apiURL, "bruteforceblocker") {
-			// Handle bruteforce blocker format
-			processBruteforceBlocker(resp.Body, ipChan)
-		} else if strings.Contains(apiURL, "torproject.org/exit-addresses") {
-			// Handle TOR exit addresses formats
-			processTorExitAddresses(resp.Body, ipChan)
-		} else if strings.Contains(apiURL, "firehol") {
-			// Handle Firehol ipset format
-			processFireholList(resp.Body, ipChan, sourceId)
-		} else {
-			// Default processing for general lists
-			processGeneralIPList(resp.Body, ipChan, sourceId)
-		}
-
-		err = resp.Body.Close()
-		if err != nil {
-			return
-		}
-		return // Success, exit the retry loop
-	}
-
-	fmt.Printf("Failed to fetch IP list from %s after %d attempts\n", apiURL, config.Retries)
-}
-
-func extractIPFromRequest(c *gin.Context) string {
-
-	ip := c.ClientIP()
-	if ip == "" {
-		ip = c.RemoteIP()
-	}
-	return ip
+	c.JSON(http.StatusOK, Response{Status: "ok", Message: "IP is not listed as risky."})
 }
 
 func checkRequestIPHandler(c *gin.Context) {
 	ip := extractIPFromRequest(c)
 
-	if ip == "::1" || ip == "127.0.0.1" {
+	if ip == "::1" || ip == "127.0.0.1" { // Common localhost IPs
 		c.JSON(http.StatusOK, ResponseWithIP{
 			Status:  "ok",
-			Message: "Seems like you are using localhost, please check if you are calling this api correctly.",
+			Message: "Request from localhost.",
+			IP:      ip,
+		})
+		return
+	}
+	if !isIPAddress(ip) { // Also catches empty IP string
+		c.JSON(http.StatusBadRequest, ResponseWithIP{Status: "error", Message: "Invalid or unidentifiable IP address.", IP: ip})
+		return
+	}
+	if isBogonOrPrivateIP(ip) {
+		c.JSON(http.StatusOK, ResponseWithIP{ // Not an error, but info that it's private
+			Status:  "ok",
+			Message: "Request from a private or bogon IP address.",
 			IP:      ip,
 		})
 		return
 	}
 
-	if !isIPAddress(ip) {
-		c.JSON(http.StatusBadRequest, "Invalid IP address format")
+	risky, reason := getRiskStatusAndReason(ip)
+	if risky {
+		c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: reason, IP: ip})
 		return
 	}
-
-	if isBogonOrPrivateIP(ip) {
-		c.JSON(http.StatusUnprocessableEntity, ResponseWithIP{
-			"ok",
-			"This is a private IP address, please check if you are calling this api correctly.",
-			ip,
-		})
-		return
-	}
-
-	if isRiskyIP(ip) {
-		reasonMapMutex.RLock()
-		message := reasonMap[ip]
-		reasonMapMutex.RUnlock()
-		c.JSON(http.StatusOK, ResponseWithIP{
-			"banned",
-			message,
-			ip,
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, ResponseWithIP{
-		"ok",
-		"",
-		ip,
-	})
+	c.JSON(http.StatusOK, ResponseWithIP{Status: "ok", Message: "IP is not listed as risky.", IP: ip})
 }
 
-// processProjectHoneypotRSS processes the Project Honeypot RSS feed
-func processProjectHoneypotRSS(body io.Reader, ipChan chan<- string) {
-	var feed RSSFeed
-	if err := xml.NewDecoder(body).Decode(&feed); err != nil {
-		fmt.Printf("Error parsing ProjectHoneypot RSS: %s\n", err)
-		return
-	}
+// getRiskStatusAndReason checks if an IP is risky and returns its status and reason.
+func getRiskStatusAndReason(ip string) (bool, string) {
+	riskyDataMutex.RLock()
+	defer riskyDataMutex.RUnlock()
 
-	for _, item := range feed.Channel.Items {
-		// Extract IP from title (format: "IP: xxx.xxx.xxx.xxx")
-		if strings.HasPrefix(item.Title, "IP:") {
-			ipStr := strings.TrimSpace(strings.TrimPrefix(item.Title, "IP:"))
-			if ipRegex.MatchString(ipStr) {
-				ipChan <- ipStr
-				reasonMapMutex.Lock()
-				reasonMap[ipStr] = "ProjectHoneypot: " + item.Description
-				reasonMapMutex.Unlock()
-			}
+	// Check single IPs first
+	if riskySingleIPs[ip] {
+		reason := reasonMap[ip]
+		if reason == "" {
+			reason = "IP found in risk database (direct match)."
 		}
-	}
-}
-
-// processSpamhausList processes the Spamhaus DROP list format
-func processSpamhausList(body io.Reader, ipChan chan<- string) {
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// Skip comments and empty lines
-		if line == "" || strings.HasPrefix(line, ";") {
-			continue
-		}
-
-		// Format: "192.168.0.0/24 ;
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) > 0 && (ipRegex.MatchString(parts[0]) || cidrRegex.MatchString(parts[0])) {
-			ipChan <- parts[0]
-
-			// Store reason if available
-			if len(parts) > 1 {
-				reasonMapMutex.Lock()
-				reasonMap[parts[0]] = "Spammers: " + strings.TrimSpace(parts[1])
-				reasonMapMutex.Unlock()
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading Spamhaus list: %s\n", err)
-	}
-}
-
-// processTorBulkExitList processes the Tor bulk exit list
-func processTorBulkExitList(body io.Reader, ipChan chan<- string) {
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// Skip comments and empty lines
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		if ipRegex.MatchString(line) {
-			ipChan <- line
-
-			// Store reason
-			reasonMapMutex.Lock()
-			reasonMap[line] = "Tor Exit Node"
-			reasonMapMutex.Unlock()
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading Tor bulk exit list: %s\n", err)
-	}
-}
-
-// processBruteforceBlocker processes the bruteforce blocker format
-func processBruteforceBlocker(body io.Reader, ipChan chan<- string) {
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// Skip comments and empty lines
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		// Format usually includes IP and additional info
-		fields := strings.Fields(line)
-		if len(fields) > 0 && ipRegex.MatchString(fields[0]) {
-			ipChan <- fields[0]
-
-			// Store reason if available
-			if len(fields) > 1 {
-				reasonMapMutex.Lock()
-				reasonMap[fields[0]] = "Bruteforce Blocker: " + strings.Join(fields[1:], " ")
-				reasonMapMutex.Unlock()
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading bruteforce blocker list: %s\n", err)
-	}
-}
-
-// processTorExitAddresses processes the Tor exit addresses format
-func processTorExitAddresses(body io.Reader, ipChan chan<- string) {
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// Skip empty lines
-		if line == "" {
-			continue
-		}
-
-		// Format: "ExitAddress 1.2.3.4 2023-01-01 00:00:00"
-		if strings.HasPrefix(line, "ExitAddress") {
-			parts := strings.Split(line, " ")
-			if len(parts) > 1 && ipRegex.MatchString(parts[1]) {
-				ipChan <- parts[1]
-
-				// Store reason
-				reasonMapMutex.Lock()
-				reasonMap[parts[1]] = "Tor Exit Node"
-				reasonMapMutex.Unlock()
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading Tor exit addresses: %s\n", err)
-	}
-}
-
-// processFireholList processes Firehol ipset format
-func processFireholList(body io.Reader, ipChan chan<- string, sourceId string) {
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// Skip comments, empty lines and metadata
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "Name:") ||
-			strings.HasPrefix(line, "Type:") || strings.HasPrefix(line, "Maintainer:") {
-			continue
-		}
-
-		if ipRegex.MatchString(line) || cidrRegex.MatchString(line) {
-			ipChan <- line
-
-			// Store source as reason
-			reasonMapMutex.Lock()
-			reasonMap[line] = "Firehol: " + sourceId
-			reasonMapMutex.Unlock()
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading Firehol list: %s\n", err)
-	}
-}
-
-// processGeneralIPList processes general IP list formats
-func processGeneralIPList(body io.Reader, ipChan chan<- string, sourceId string) {
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		// Handle lines with additional data
-		fields := strings.Fields(line)
-		if len(fields) > 0 {
-			if ipRegex.MatchString(fields[0]) || cidrRegex.MatchString(fields[0]) {
-				ipChan <- fields[0]
-
-				// Store source as reason
-				reasonMapMutex.Lock()
-				reasonMap[fields[0]] = "Blocked IP source: " + sourceId
-				reasonMapMutex.Unlock()
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading general IP list: %s\n", err)
-	}
-}
-
-// getSourceIdentifier extracts a readable source identifier from a URL
-func getSourceIdentifier(url string) string {
-	// Extract domain and path
-	if strings.Contains(url, "projecthoneypot.org") {
-		return "Project Honeypot"
-	} else if strings.Contains(url, "torproject.org") {
-		return "Tor Project"
-	} else if strings.Contains(url, "spamhaus.org") {
-		return "Spamhaus"
-	} else if strings.Contains(url, "cinsscore.com") {
-		return "CINS Score"
-	} else if strings.Contains(url, "blocklist.de") {
-		return "Blocklist.de"
-	} else if strings.Contains(url, "firehol") && strings.Contains(url, "level1") {
-		return "Firehol Level 1"
-	} else if strings.Contains(url, "firehol") && strings.Contains(url, "level2") {
-		return "Firehol Level 2"
-	} else if strings.Contains(url, "firehol") && strings.Contains(url, "level3") {
-		return "Firehol Level 3"
-	} else if strings.Contains(url, "firehol") && strings.Contains(url, "level4") {
-		return "Firehol Level 4"
-	} else if strings.Contains(url, "firehol") && strings.Contains(url, "cybercrime") {
-		return "Firehol Cybercrime"
-	} else if strings.Contains(url, "greensnow") {
-		return "GreenSnow"
-	} else if strings.Contains(url, "malwaredomainlist") {
-		return "Malware Domain List"
-	} else if strings.Contains(url, "X4BNet") {
-		return "X4B VPN/Datacenter List"
-	} else if strings.Contains(url, "bruteforceblocker") {
-		return "Bruteforce Blocker"
-	} else if strings.Contains(url, "dan.me.uk") {
-		return "Dan.me.uk Tor List"
-	} else if strings.Contains(url, "stamparm") {
-		return "IPSum Wall of Shame"
-	}
-
-	// Generic fallback
-	return "Security List"
-}
-
-// processProxies filters the proxies list to remove those with risky IPs
-func processProxies(proxies []Proxy) []Proxy {
-	var (
-		wg              sync.WaitGroup
-		resultMutex     sync.Mutex
-		nonRiskyProxies []Proxy
-		semaphore       = make(chan struct{}, 50) // limit concurrency
-	)
-
-	for _, proxy := range proxies {
-		wg.Add(1)
-		semaphore <- struct{}{} // acquire
-
-		go func(p Proxy) {
-			defer wg.Done()
-			defer func() { <-semaphore }() // release
-
-			// Check if server is an IP address
-			if isIPAddress(p.Server) {
-				if isRiskyIP(p.Server) || isBogonOrPrivateIP(p.Server) {
-					return
-				}
-			}
-			// If not risky or bogon, add to results
-			resultMutex.Lock()
-			nonRiskyProxies = append(nonRiskyProxies, p)
-			resultMutex.Unlock()
-		}(proxy)
-	}
-
-	wg.Wait()
-	return nonRiskyProxies
-}
-
-// isIPAddress checks if a string is a valid IPv4 address
-func isIPAddress(s string) bool {
-	return ipRegex.MatchString(s)
-}
-
-// isRiskyIP checks if an IP is in the risky list
-func isRiskyIP(ip string) bool {
-	// First check direct match
-	riskyIPsMutex.RLock()
-	if riskyIPs[ip] {
-		riskyIPsMutex.RUnlock()
-		return true
+		return true, reason
 	}
 
 	// Then check CIDR ranges
 	ipAddr := net.ParseIP(ip)
 	if ipAddr == nil {
-		riskyIPsMutex.RUnlock()
-		return false
+		return false, "" // Should not happen if isIPAddress was called before
 	}
 
-	for cidr := range riskyIPs {
-		if strings.Contains(cidr, "/") {
-			_, ipNet, err := net.ParseCIDR(cidr)
-			if err == nil && ipNet.Contains(ipAddr) {
-				riskyIPsMutex.RUnlock()
-				return true
+	for _, cidrEntry := range riskyCIDRInfo {
+		if cidrEntry.Net.Contains(ipAddr) {
+			reason := reasonMap[cidrEntry.OriginalCIDR]
+			if reason == "" {
+				reason = fmt.Sprintf("IP within risky CIDR %s.", cidrEntry.OriginalCIDR)
+			}
+			return true, reason
+		}
+	}
+	return false, ""
+}
+
+func updateIPListsPeriodically(config Config) {
+	if cachedData, found := appCache.Get(ipCacheKey); found {
+		if ipCache, ok := cachedData.(IPCacheData); ok {
+			fmt.Printf("Loading %d IP/CIDR entries from cache...\n", len(ipCache.Entries))
+			processLoadedEntries(ipCache.Entries, make(map[string]string)) // Initially no reasons from cache
+			riskyDataMutex.RLock()
+			count := len(riskySingleIPs) + len(riskyCIDRInfo)
+			riskyDataMutex.RUnlock()
+			fmt.Printf("Loaded %d unique entries from cache into monitored lists.\n", count)
+		}
+	}
+
+	updateIPLists(config) // Initial update
+
+	ticker := time.NewTicker(updateFrequency)
+	defer ticker.Stop()
+	for range ticker.C {
+		updateIPLists(config)
+	}
+}
+
+// processLoadedEntries processes a list of IP/CIDR strings and populates the global risk data structures.
+// It takes a list of entries and a map of reasons.
+func processLoadedEntries(entries []string, reasonsForEntries map[string]string) {
+	localSingleIPs := make(map[string]bool)
+	localCIDRInfo := make([]CIDRInfo, 0)
+	localReasonMap := make(map[string]string)
+
+	for _, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		if cidrRegex.MatchString(entry) {
+			_, ipNet, err := net.ParseCIDR(entry)
+			if err == nil {
+				localCIDRInfo = append(localCIDRInfo, CIDRInfo{Net: ipNet, OriginalCIDR: entry})
+				if reason, ok := reasonsForEntries[entry]; ok {
+					localReasonMap[entry] = reason
+				}
+			} else {
+				fmt.Printf("Error parsing CIDR from loaded entries '%s': %v\n", entry, err)
+			}
+		} else if ipRegex.MatchString(entry) {
+			localSingleIPs[entry] = true
+			if reason, ok := reasonsForEntries[entry]; ok {
+				localReasonMap[entry] = reason
+			}
+		} else {
+			// fmt.Printf("Skipping invalid entry from loaded data: %s\n", entry)
+		}
+	}
+
+	riskyDataMutex.Lock()
+	riskySingleIPs = localSingleIPs
+	riskyCIDRInfo = localCIDRInfo
+	// Only overwrite reasonMap if new reasons were provided, otherwise merge or keep existing
+	// For now, let's assume reasonsForEntries is the definitive new set for these entries
+	if len(reasonsForEntries) > 0 || len(entries) > 0 { // if there are entries, even with no reasons, clear old potentially irrelevant reasons.
+		reasonMap = localReasonMap
+	}
+	riskyDataMutex.Unlock()
+}
+
+func updateIPLists(config Config) {
+	fmt.Println("Starting IP lists update...")
+
+	var wg sync.WaitGroup
+	// Channel for IPAssociation to include reasons directly
+	ipAssociationChan := make(chan IPAssociation, 2000) // Increased buffer size
+
+	for _, apiURL := range ipListAPIs {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			fetchIPList(url, config, ipAssociationChan)
+		}(apiURL)
+	}
+
+	go func() {
+		wg.Wait()
+		close(ipAssociationChan)
+	}()
+
+	newEntries := make(map[string]bool)   // Temporary set to store unique entries
+	newReasons := make(map[string]string) // Temporary map for reasons
+
+	for assoc := range ipAssociationChan {
+		if assoc.Entry != "" {
+			newEntries[assoc.Entry] = true // Mark entry as present
+			if assoc.Reason != "" {
+				// If multiple sources list the same IP with different reasons, the last one wins.
+				// Or, one could append reasons:
+				// if existingReason, ok: = newReasons[assoc.Entry]; ok {
+				//  newReasons[assoc.Entry] = existingReason + "; " + assoc.Reason
+				// } else {
+				//  newReasons[assoc.Entry] = assoc.Reason
+				// }
+				newReasons[assoc.Entry] = assoc.Reason
 			}
 		}
 	}
 
-	riskyIPsMutex.RUnlock()
-	return false
+	if len(newEntries) > 0 {
+		entryList := make([]string, 0, len(newEntries))
+		for entry := range newEntries {
+			entryList = append(entryList, entry)
+		}
+
+		processLoadedEntries(entryList, newReasons) // Process and set global data structures
+
+		appCache.Set(ipCacheKey, IPCacheData{
+			Timestamp: time.Now().Unix(),
+			Entries:   entryList,
+		}, ipCacheExpiry)
+		riskyDataMutex.RLock()
+		count := len(riskySingleIPs) + len(riskyCIDRInfo)
+		reasonCount := len(reasonMap)
+		riskyDataMutex.RUnlock()
+		fmt.Printf("Successfully updated risky IP lists: %d unique entries. Reason map entries: %d\n", count, reasonCount)
+	} else {
+		fmt.Println("Warning: No IP data obtained from any source. Lists not updated.")
+	}
 }
+
+func fetchIPList(apiURL string, config Config, ipAssociationChan chan<- IPAssociation) {
+	sourceID := getSourceIdentifier(apiURL)
+	client := &http.Client{
+		Timeout: time.Duration(config.Timeout) * time.Millisecond,
+	}
+
+	for attempt := 0; attempt < config.Retries; attempt++ {
+		req, err := http.NewRequest("GET", apiURL, nil)
+		if err != nil {
+			fmt.Printf("Error creating request for %s: %v\n", apiURL, err)
+			time.Sleep(time.Duration(config.RetryDelay*(attempt+1)) * time.Millisecond)
+			continue
+		}
+		req.Header.Set("User-Agent", "RiskyIPFilterBot/1.0 (compatible; Mozilla/5.0)")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Printf("Error fetching IP list from %s (attempt %d/%d): %v\n", apiURL, attempt+1, config.Retries, err)
+			time.Sleep(time.Duration(config.RetryDelay*(attempt+1)) * time.Millisecond)
+			continue
+		}
+
+		var _ error
+		switch {
+		case strings.Contains(apiURL, "projecthoneypot.org"):
+			processProjectHoneypotRSS(resp.Body, ipAssociationChan)
+		case strings.Contains(apiURL, "spamhaus.org/drop"):
+			processSpamhausList(resp.Body, ipAssociationChan)
+		case strings.Contains(apiURL, "torproject.org/torbulkexitlist"):
+			processTorBulkExitList(resp.Body, ipAssociationChan)
+		case strings.Contains(apiURL, "bruteforceblocker"):
+			processBruteforceBlocker(resp.Body, ipAssociationChan)
+		case strings.Contains(apiURL, "torproject.org/exit-addresses"):
+			processTorExitAddresses(resp.Body, ipAssociationChan)
+		case strings.Contains(apiURL, "firehol"):
+			processFireholList(resp.Body, ipAssociationChan, sourceID)
+		default:
+			processGeneralIPList(resp.Body, ipAssociationChan, sourceID)
+		}
+
+		// 立即关闭 resp.Body，避免资源泄漏
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			fmt.Printf("Error closing response body for %s: %v\n", apiURL, closeErr)
+		}
+
+		// 成功处理后直接 return
+		return
+	}
+	fmt.Printf("Failed to fetch IP list from %s after %d attempts\n", apiURL, config.Retries)
+}
+
+func extractIPFromRequest(c *gin.Context) string {
+	// c.ClientIP() is usually sufficient when trusted proxies are configured.
+	ip := c.ClientIP()
+	// Fallback or additional checks if needed, though Gin's ClientIP is robust.
+	// if ip == "" { ip = c.RemoteIP() }
+	return ip
+}
+
+// Processors for different list formats
+// They now send IPAssociation to the channel
+
+func processProjectHoneypotRSS(body io.Reader, ipAssociationChan chan<- IPAssociation) {
+	var feed RSSFeed
+	if err := xml.NewDecoder(body).Decode(&feed); err != nil {
+		fmt.Printf("Error parsing ProjectHoneypot RSS: %v\n", err)
+		return
+	}
+	for _, item := range feed.Channel.Items {
+		if strings.HasPrefix(item.Title, "IP:") {
+			ipStr := strings.TrimSpace(strings.TrimPrefix(item.Title, "IP:"))
+			if ipRegex.MatchString(ipStr) {
+				reason := "ProjectHoneypot: " + strings.TrimSpace(item.Description)
+				ipAssociationChan <- IPAssociation{Entry: ipStr, Reason: reason}
+			}
+		}
+	}
+}
+
+func processSpamhausList(body io.Reader, ipAssociationChan chan<- IPAssociation) {
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ";") {
+			continue
+		}
+		parts := strings.SplitN(line, ";", 2) // Split by semicolon for entry and comment
+		entry := strings.TrimSpace(parts[0])
+		if ipRegex.MatchString(entry) || cidrRegex.MatchString(entry) {
+			reason := "Spamhaus DROP list"
+			if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
+				reason += ": " + strings.TrimSpace(parts[1])
+			}
+			ipAssociationChan <- IPAssociation{Entry: entry, Reason: reason}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Error reading Spamhaus list: %v\n", err)
+	}
+}
+
+func processTorBulkExitList(body io.Reader, ipAssociationChan chan<- IPAssociation) {
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if ipRegex.MatchString(line) {
+			ipAssociationChan <- IPAssociation{Entry: line, Reason: "Tor Bulk Exit Node"}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Error reading Tor bulk exit list: %v\n", err)
+	}
+}
+
+func processBruteforceBlocker(body io.Reader, ipAssociationChan chan<- IPAssociation) {
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) > 0 && ipRegex.MatchString(fields[0]) {
+			reason := "Bruteforce Blocker list"
+			if len(fields) > 1 {
+				reason += ": " + strings.Join(fields[1:], " ")
+			}
+			ipAssociationChan <- IPAssociation{Entry: fields[0], Reason: reason}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Error reading bruteforce blocker list: %v\n", err)
+	}
+}
+
+func processTorExitAddresses(body io.Reader, ipAssociationChan chan<- IPAssociation) {
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "ExitAddress") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 && ipRegex.MatchString(parts[1]) {
+				ipAssociationChan <- IPAssociation{Entry: parts[1], Reason: "Tor Exit Address"}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Error reading Tor exit addresses: %v\n", err)
+	}
+}
+
+func processFireholList(body io.Reader, ipAssociationChan chan<- IPAssociation, sourceID string) {
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") ||
+			strings.HasPrefix(line, "Name:") || strings.HasPrefix(line, "Type:") ||
+			strings.HasPrefix(line, "Maintainer:") || strings.HasPrefix(line, "Version:") {
+			continue
+		}
+		if ipRegex.MatchString(line) || cidrRegex.MatchString(line) {
+			ipAssociationChan <- IPAssociation{Entry: line, Reason: "Firehol list: " + sourceID}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Error reading Firehol list (%s): %v\n", sourceID, err)
+	}
+}
+
+func processGeneralIPList(body io.Reader, ipAssociationChan chan<- IPAssociation, sourceID string) {
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Some lists might have IP then other data; take the first field if it's an IP/CIDR
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			entry := fields[0]
+			if ipRegex.MatchString(entry) || cidrRegex.MatchString(entry) {
+				reason := "General blocklist: " + sourceID
+				// Optionally, try to capture more context if available
+				// if len(fields) > 1 { reason += " (" + strings.Join(fields[1:], " ") + ")" }
+				ipAssociationChan <- IPAssociation{Entry: entry, Reason: reason}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Error reading general IP list (%s): %v\n", sourceID, err)
+	}
+}
+
+func getSourceIdentifier(rawURL string) string {
+	// This can be made more sophisticated, e.g., using a map or regexes
+	if strings.Contains(rawURL, "projecthoneypot.org") {
+		return "Project Honeypot"
+	} else if strings.Contains(rawURL, "torproject.org") {
+		return "Tor Project"
+	} else if strings.Contains(rawURL, "spamhaus.org") {
+		return "Spamhaus"
+	} else if strings.Contains(rawURL, "cinsscore.com") {
+		return "CINS Score"
+	} else if strings.Contains(rawURL, "blocklist.de") {
+		return "Blocklist.de"
+	} else if strings.Contains(rawURL, "firehol/blocklist-ipsets/master/cybercrime.ipset") {
+		return "Firehol Cybercrime"
+	} else if strings.Contains(rawURL, "firehol_level1.netset") {
+		return "Firehol Level 1"
+	} else if strings.Contains(rawURL, "firehol_level2.netset") {
+		return "Firehol Level 2"
+	} else if strings.Contains(rawURL, "firehol_level3.netset") {
+		return "Firehol Level 3"
+	} else if strings.Contains(rawURL, "firehol_level4.netset") {
+		return "Firehol Level 4"
+	} else if strings.Contains(rawURL, "greensnow.co") {
+		return "GreenSnow"
+	} else if strings.Contains(rawURL, "X4BNet") {
+		return "X4BNet VPN/Datacenter"
+	} else if strings.Contains(rawURL, "bruteforceblocker") {
+		return "BruteforceBlocker"
+	} else if strings.Contains(rawURL, "dan.me.uk/torlist") {
+		return "Dan.me.uk Tor List"
+	} else if strings.Contains(rawURL, "stamparm/ipsum") {
+		// Extract level from URL, e.g. levels/8.txt -> Ipsum Level 8
+		re := regexp.MustCompile(`levels/(\d+)\.txt`)
+		matches := re.FindStringSubmatch(rawURL)
+		if len(matches) == 2 {
+			return "IPSum Level " + matches[1]
+		}
+		return "IPSum Wall of Shame"
+	}
+	// Fallback using domain
+	parsedURL, err := url.Parse(rawURL)
+	if err == nil {
+		return parsedURL.Hostname()
+	}
+	return "Unknown Source"
+}
+
+func processProxies(proxies []Proxy, concurrencyLimit int) []Proxy {
+	var (
+		wg              sync.WaitGroup
+		resultMutex     sync.Mutex
+		nonRiskyProxies = make([]Proxy, 0, len(proxies))
+		semaphore       = make(chan struct{}, concurrencyLimit) // Use concurrency from config
+	)
+
+	for _, proxy := range proxies {
+		wg.Add(1)
+		semaphore <- struct{}{} // Acquire semaphore slot
+
+		go func(p Proxy) {
+			defer func() {
+				<-semaphore // Release semaphore slot
+				wg.Done()
+			}()
+
+			if isIPAddress(p.Server) { // Only check if server is an IP
+				if isBogonOrPrivateIP(p.Server) {
+					return // Skip bogon/private IPs
+				}
+				risky, _ := getRiskStatusAndReason(p.Server) // Use the main checker
+				if risky {
+					return // Skip risky IPs
+				}
+			}
+			// If not an IP, or IP is not bogon/private/risky, add to results
+			resultMutex.Lock()
+			nonRiskyProxies = append(nonRiskyProxies, p)
+			resultMutex.Unlock()
+		}(proxy)
+	}
+	wg.Wait()
+	return nonRiskyProxies
+}
+
+func isIPAddress(s string) bool {
+	// Consider both IPv4 and IPv6 if needed, but current regexes are IPv4 specific.
+	// net.ParseIP can validate both, but ipRegex is used for matching specific formats.
+	// For general validation, net.ParseIP(s) != nil is better.
+	// However, since current lists are IPv4, ipRegex is fine.
+	return ipRegex.MatchString(s) || (net.ParseIP(s) != nil && strings.Contains(s, ":")) // Basic IPv6 check
+}
+
+// isRiskyIP is now effectively replaced by getRiskStatusAndReason for external use.
+// The internal logic is within getRiskStatusAndReason and uses riskySingleIPs and riskyCIDRInfo.
