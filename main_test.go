@@ -49,7 +49,7 @@ func TestCheckRequestIPHandlerReturnsErrorForInvalidIP(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.JSONEq(t, `{"message":"Invalid or unidentifiable IP address.", "status":"error"}`, w.Body.String())
+	assert.JSONEq(t, `{"ip":"invalid-ip", "message":"Invalid or unidentifiable IP address.", "status":"error"}`, w.Body.String())
 }
 
 func TestCheckRequestIPHandlerReturnsPrivateIPMessage(t *testing.T) {
