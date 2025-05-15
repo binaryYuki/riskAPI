@@ -2,8 +2,12 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/patrickmn/go-cache"
 	"io"
 	"log"
 	"net"
@@ -14,16 +18,17 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
-	"github.com/patrickmn/go-cache"
 )
 
 var (
 	ipRegex   = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}$`)
 	cidrRegex = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}$`)
 )
+
+type FastlyIPList struct {
+	Addresses     []string `json:"addresses"`
+	IPv6Addresses []string `json:"ipv6_addresses"`
+}
 
 // Data structures for storing risky IPs
 var (
@@ -63,6 +68,43 @@ type Config struct {
 type Proxy struct {
 	Name   string `json:"name"`
 	Server string `json:"server"`
+}
+
+var localProxies = []string{
+	"10.42.0.0/16", "10.0.0.0/16", "172.16.0.0/12", "fc00::/7",
+}
+
+func updateFastlyIPs(router *gin.Engine) {
+	for {
+		resp, err := http.Get("https://api.fastly.com/public-ip-list")
+		if err == nil {
+			if err != nil {
+				return
+			}
+			var ipList FastlyIPList
+			if err := json.NewDecoder(resp.Body).Decode(&ipList); err == nil {
+				// 合并本地和 Fastly IP 段
+				allProxies := append([]string{}, localProxies...)
+				allProxies = append(allProxies, ipList.Addresses...)
+				allProxies = append(allProxies, ipList.IPv6Addresses...)
+				// 设置 trusted proxies
+				if err := router.SetTrustedProxies(allProxies); err != nil {
+					log.Printf("SetTrustedProxies error: %v", err)
+				}
+				log.Printf("Fastly IPs updated: %d IPv4, %d IPv6", len(ipList.Addresses), len(ipList.IPv6Addresses))
+			} else {
+				log.Printf("Decode Fastly IPs error: %v", err)
+			}
+		} else {
+			log.Printf("Fetch Fastly IPs error: %v", err)
+			// 拉取失败时，只用本地 trusted proxies
+			if err := router.SetTrustedProxies(localProxies); err != nil {
+				log.Printf("SetTrustedProxies fallback error: %v", err)
+			}
+		}
+		err = resp.Body.Close()
+		time.Sleep(1 * time.Hour)
+	}
 }
 
 // IPCacheData represents the cached IP data structure (list of IP/CIDR strings)
@@ -207,10 +249,12 @@ func main() {
 	router := gin.Default()
 
 	// It's important to set trusted proxies if running behind a reverse proxy
-	err := router.SetTrustedProxies([]string{"10.42.0.0/16", "10.0.0.0/16", "172.16.0.0/12", "fc00::/7"})
-	if err != nil {
-		log.Fatalf("Failed to set trusted proxies: %v", err)
-	}
+	//err := router.SetTrustedProxies([]string{"10.42.0.0/16", "10.0.0.0/16", "172.16.0.0/12", "fc00::/7"})
+	//if err != nil {
+	//	log.Fatalf("Failed to set trusted proxies: %v", err)
+	//}
+
+	go updateFastlyIPs(router)
 
 	router.NoRoute(func(c *gin.Context) {
 		handleError(c, http.StatusNotFound, "Not Found")
@@ -547,7 +591,9 @@ func extractIPFromRequest(c *gin.Context) string {
 	// c.ClientIP() is usually sufficient when trusted proxies are configured.
 	ip := c.ClientIP()
 	// Fallback or additional checks if needed, though Gin's ClientIP is robust.
-	// if ip == "" { ip = c.RemoteIP() }
+	if ip == "" {
+		ip = c.RemoteIP()
+	}
 	return ip
 }
 
