@@ -94,39 +94,75 @@ func isIPInFastlyCIDR(ip string) bool {
 
 func updateFastlyIPs(router *gin.Engine) {
 	for {
+		var ipList FastlyIPList
 		resp, err := http.Get("https://api.fastly.com/public-ip-list")
-		var ipList FastlyIPList // 提前声明
-		if err == nil {
-			if err != nil {
-				return
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&ipList); err == nil {
-				// ... 这里可以用 ipList ...
-				// ...
-			} else {
-				log.Printf("Decode Fastly IPs error: %v", err)
-			}
+		if err == nil && resp != nil {
+			func() {
+				defer func() {
+					if cerr := resp.Body.Close(); cerr != nil {
+						fmt.Println("resp.Body.Close error:", cerr)
+					}
+				}()
+				if err := json.NewDecoder(resp.Body).Decode(&ipList); err == nil {
+					fmt.Println("Fetched Fastly IPs from API")
+				} else {
+					fmt.Println("Decode Fastly IPs error:", err)
+				}
+			}()
 		} else {
-			log.Printf("Fetch Fastly IPs error: %v", err)
-			// 拉取失败时，只用本地 trusted proxies
-			if err := router.SetTrustedProxies(localProxies); err != nil {
-				log.Printf("SetTrustedProxies fallback error: %v", err)
+			// failback to hardcoded IPs
+			ipList = FastlyIPList{
+				Addresses: []string{
+					"23.235.32.0/20", "43.249.72.0/22", "103.244.50.0/24",
+					"103.245.222.0/23", "103.245.224.0/24", "104.156.80.0/20",
+					"140.248.64.0/18", "140.248.128.0/17", "146.75.0.0/17",
+					"151.101.0.0/16", "157.52.64.0/18", "167.82.0.0/17",
+					"167.82.128.0/20", "167.82.160.0/20", "167.82.224.0/20",
+					"172.111.64.0/18", "185.31.16.0/22", "199.27.72.0/21",
+					"199.232.0.0/16",
+				},
+				IPv6Addresses: []string{
+					"2a04:4e40::/32", "2a04:4e42::/32",
+				},
 			}
-			// 这里 ipList 还是空的
+			fmt.Println("Using hardcoded Fastly IPs")
 		}
-		err = resp.Body.Close()
-		var cidrs []*net.IPNet
-		for _, cidrStr := range ipList.Addresses {
-			_, ipNet, err := net.ParseCIDR(cidrStr)
-			if err == nil {
-				cidrs = append(cidrs, ipNet)
-			}
+
+		// combine local and Fastly IPs
+		allProxies := append([]string{}, localProxies...)
+		allProxies = append(allProxies, ipList.Addresses...)
+		allProxies = append(allProxies, ipList.IPv6Addresses...)
+		if err := router.SetTrustedProxies(allProxies); err != nil {
+			fmt.Println("SetTrustedProxies error:", err)
+		} else {
+			fmt.Printf("SetTrustedProxies: %d IPv4, %d IPv6\n", len(ipList.Addresses), len(ipList.IPv6Addresses))
 		}
+
+		// Parse CIDR strings into net.IPNet
+		cidrs := parseCIDRs(ipList.Addresses)
+		cidrs = append(cidrs, parseCIDRs(ipList.IPv6Addresses)...)
+
 		fastlyCIDRsMutex.Lock()
 		fastlyCIDRs = cidrs
 		fastlyCIDRsMutex.Unlock()
+		fmt.Printf("Updated fastlyCIDRs: %d entries\n", len(cidrs))
+
 		time.Sleep(1 * time.Hour)
 	}
+}
+
+// parseCIDRs parses a list of CIDR strings and returns a slice of net.IPNet
+func parseCIDRs(cidrStrs []string) []*net.IPNet {
+	var cidrs []*net.IPNet
+	for _, cidrStr := range cidrStrs {
+		_, ipNet, err := net.ParseCIDR(cidrStr)
+		if err == nil {
+			cidrs = append(cidrs, ipNet)
+		} else {
+			fmt.Printf("Parse CIDR error: %s %v\n", cidrStr, err)
+		}
+	}
+	return cidrs
 }
 
 // IPCacheData represents the cached IP data structure (list of IP/CIDR strings)
@@ -615,6 +651,8 @@ func extractIPFromRequest(c *gin.Context) string {
 	if ip == "" {
 		ip = c.RemoteIP()
 	}
+	// log ip
+	fmt.Printf("Request IP: %s\n", ip)
 	if isIPInFastlyCIDR(ip) {
 		fastlyClientIP := c.Request.Header.Get("Fastly-Client-Ip")
 		if fastlyClientIP != "" && isIPAddress(fastlyClientIP) {
