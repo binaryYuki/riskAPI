@@ -20,6 +20,9 @@ import (
 	"time"
 )
 
+var fastlyCIDRs []*net.IPNet
+var fastlyCIDRsMutex sync.RWMutex
+
 var (
 	ipRegex   = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}$`)
 	cidrRegex = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}$`)
@@ -71,27 +74,35 @@ type Proxy struct {
 }
 
 var localProxies = []string{
-	"10.42.0.0/16", "10.0.0.0/16", "172.16.0.0/12", "fc00::/7",
+	"10.42.0.0/8", "10.0.0.0/16", "172.16.0.0/12", "fc00::/7",
+}
+
+func isIPInFastlyCIDR(ip string) bool {
+	ipAddr := net.ParseIP(ip)
+	if ipAddr == nil {
+		return false
+	}
+	fastlyCIDRsMutex.RLock()
+	defer fastlyCIDRsMutex.RUnlock()
+	for _, ipNet := range fastlyCIDRs {
+		if ipNet.Contains(ipAddr) {
+			return true
+		}
+	}
+	return false
 }
 
 func updateFastlyIPs(router *gin.Engine) {
 	for {
 		resp, err := http.Get("https://api.fastly.com/public-ip-list")
+		var ipList FastlyIPList // 提前声明
 		if err == nil {
 			if err != nil {
 				return
 			}
-			var ipList FastlyIPList
 			if err := json.NewDecoder(resp.Body).Decode(&ipList); err == nil {
-				// 合并本地和 Fastly IP 段
-				allProxies := append([]string{}, localProxies...)
-				allProxies = append(allProxies, ipList.Addresses...)
-				allProxies = append(allProxies, ipList.IPv6Addresses...)
-				// 设置 trusted proxies
-				if err := router.SetTrustedProxies(allProxies); err != nil {
-					log.Printf("SetTrustedProxies error: %v", err)
-				}
-				log.Printf("Fastly IPs updated: %d IPv4, %d IPv6", len(ipList.Addresses), len(ipList.IPv6Addresses))
+				// ... 这里可以用 ipList ...
+				// ...
 			} else {
 				log.Printf("Decode Fastly IPs error: %v", err)
 			}
@@ -101,8 +112,19 @@ func updateFastlyIPs(router *gin.Engine) {
 			if err := router.SetTrustedProxies(localProxies); err != nil {
 				log.Printf("SetTrustedProxies fallback error: %v", err)
 			}
+			// 这里 ipList 还是空的
 		}
 		err = resp.Body.Close()
+		var cidrs []*net.IPNet
+		for _, cidrStr := range ipList.Addresses {
+			_, ipNet, err := net.ParseCIDR(cidrStr)
+			if err == nil {
+				cidrs = append(cidrs, ipNet)
+			}
+		}
+		fastlyCIDRsMutex.Lock()
+		fastlyCIDRs = cidrs
+		fastlyCIDRsMutex.Unlock()
 		time.Sleep(1 * time.Hour)
 	}
 }
@@ -308,7 +330,6 @@ func main() {
 		ipCheckGroup.POST("/:ip", checkIPHandler)
 	}
 	router.GET("/api/v1/ip", checkRequestIPHandler) // Checks the request's source IP
-
 	router.GET("/api/status", func(c *gin.Context) {
 		riskyDataMutex.RLock()
 		count := len(riskySingleIPs) + len(riskyCIDRInfo)
@@ -593,6 +614,16 @@ func extractIPFromRequest(c *gin.Context) string {
 	// Fallback or additional checks if needed, though Gin's ClientIP is robust.
 	if ip == "" {
 		ip = c.RemoteIP()
+	}
+	if isIPInFastlyCIDR(ip) {
+		fastlyClientIP := c.Request.Header.Get("Fastly-Client-Ip")
+		if fastlyClientIP != "" && isIPAddress(fastlyClientIP) {
+			return fastlyClientIP
+		}
+		cfConnectingIP := c.Request.Header.Get("CF-Connecting-IP")
+		if cfConnectingIP != "" && isIPAddress(cfConnectingIP) {
+			return cfConnectingIP
+		}
 	}
 	return ip
 }
