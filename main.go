@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/patrickmn/go-cache"
 	"io"
 	"log"
@@ -289,6 +290,18 @@ func handleError(c *gin.Context, statusCode int, message string) {
 	c.Abort()
 }
 
+func CorrelationMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		correlationID := c.GetHeader("X-Correlation-ID")
+		if correlationID == "" {
+			correlationID = uuid.New().String()
+		}
+		c.Set("correlation_id", correlationID)
+		c.Header("X-Correlation-ID", correlationID)
+		c.Next()
+	}
+}
+
 func main() {
 	appCache = cache.New(ipCacheExpiry, 10*time.Minute)
 	riskySingleIPs = make(map[string]bool)
@@ -384,6 +397,27 @@ func main() {
 	if err := router.Run(":8080"); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+	router.Use(CorrelationMiddleware())
+	// 4. 自定义日志中间件
+	router.Use(func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		latency := time.Since(start)
+		status := c.Writer.Status()
+
+		correlationID, _ := c.Get("correlation_id")
+		log.Printf("[GIN] %s | %3d | %13v | %-15s | %-20s | correlation_id=%v",
+			time.Now().Format("2006/01/02 - 15:04:05"),
+			status,
+			latency,
+			c.ClientIP(),
+			c.Request.URL.Path,
+			correlationID,
+		)
+	})
+
+	// 5. Gin 自带的恢复中间件（可选）
+	router.Use(gin.Recovery())
 }
 
 func checkIPHandler(c *gin.Context) {

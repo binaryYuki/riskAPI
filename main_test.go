@@ -99,3 +99,44 @@ func TestCheckRequestIPHandlerReturnsOKForSafeIP(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.JSONEq(t, `{"status":"ok","message":"IP is not listed as risky.","ip":"8.8.4.4"}`, w.Body.String())
 }
+
+func TestCorrelationMiddleware_GeneratesAndReturnsCorrelationID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(CorrelationMiddleware())
+	router.GET("/test-correlation", func(c *gin.Context) {
+		correlationID, exists := c.Get("correlation_id")
+		assert.True(t, exists)
+		c.String(http.StatusOK, "%v", correlationID)
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, "/test-correlation", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	correlationID := w.Body.String()
+	assert.NotEmpty(t, correlationID)
+	assert.NotEmpty(t, w.Header().Get("X-Correlation-ID"))
+	assert.Equal(t, correlationID, w.Header().Get("X-Correlation-ID"))
+}
+
+func TestCorrelationMiddleware_UsesProvidedCorrelationID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(CorrelationMiddleware())
+	router.GET("/test-correlation", func(c *gin.Context) {
+		correlationID, exists := c.Get("correlation_id")
+		assert.True(t, exists)
+		c.String(http.StatusOK, "%v", correlationID)
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, "/test-correlation", nil)
+	req.Header.Set("X-Correlation-ID", "test-id-123")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "test-id-123", w.Body.String())
+	assert.Equal(t, "test-id-123", w.Header().Get("X-Correlation-ID"))
+}
