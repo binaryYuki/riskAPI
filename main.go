@@ -796,6 +796,11 @@ func processProjectHoneypotRSS(body io.Reader, ipAssociationChan chan<- IPAssoci
 	peekBuf := make([]byte, 512)
 	n, _ := body.Read(peekBuf)
 	peek := string(peekBuf[:n])
+	// 检查是否为 HTML 页面（如被反爬）
+	if strings.HasPrefix(strings.TrimSpace(peek), "<!DOCTYPE html>") || strings.HasPrefix(strings.TrimSpace(peek), "<html") {
+		fmt.Printf("ProjectHoneypot RSS 获取失败，疑似被反爬或内容非预期，已跳过，不影响主流程。\nPreview: %s\n", peek)
+		return
+	}
 	// reconstruct body reader to allow multiple reads
 	feedReader := io.MultiReader(strings.NewReader(peek), body)
 
