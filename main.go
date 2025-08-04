@@ -298,6 +298,10 @@ func CorrelationMiddleware() gin.HandlerFunc {
 		}
 		c.Set("correlation_id", correlationID)
 		c.Header("X-Correlation-ID", correlationID)
+		// cache-control
+		//private, no-cache, no-store, max-age=0, must-revalidate
+		c.Set("cache-control", "private, no-cache, no-store, max-age=0, must-revalidate")
+		c.Header("cache-control", "private, no-cache, no-store, max-age=0, must-revalidate")
 		c.Next()
 	}
 }
@@ -326,6 +330,7 @@ func main() {
 	//}
 
 	go updateFastlyIPs(router)
+	startCDNListSync()
 
 	router.NoRoute(func(c *gin.Context) {
 		handleError(c, http.StatusNotFound, "Not Found")
@@ -391,6 +396,65 @@ func main() {
 				Count:     count,
 			},
 		})
+	})
+
+	// 新增 cdnlist 路由
+	router.GET("/cdn/:name", func(c *gin.Context) {
+		name := c.Param("name")
+		allowed := map[string]bool{"edgeone": true, "cloudflare": true, "fastly": true}
+		if !allowed[name] {
+			handleError(c, http.StatusNotFound, "Not Found")
+			return
+		}
+		filePath := "data/" + name + ".txt"
+		file, err := os.Open(filePath)
+		if err != nil {
+			handleError(c, http.StatusInternalServerError, "File open error")
+			return
+		}
+		defer func(file *os.File) {
+			err := file.Close()
+			if err != nil {
+				return
+			}
+		}(file)
+		scanner := bufio.NewScanner(file)
+		var lines []string
+		for scanner.Scan() {
+			lines = append(lines, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			handleError(c, http.StatusInternalServerError, "File read error")
+			return
+		}
+		c.String(http.StatusOK, strings.Join(lines, "\n"))
+	})
+
+	// 新增 /cdn/all 路由，合并所有 CDN 列表并分割
+	router.GET("/cdn/all", func(c *gin.Context) {
+		var result []string
+		providers := []struct{ name, label string }{
+			{"edgeone", "====== edgeone ======"},
+			{"cloudflare", "====== cloudflare ======"},
+			{"fastly", "====== fastly ======"},
+		}
+		for _, p := range providers {
+			result = append(result, p.label)
+			filePath := "data/" + p.name + ".txt"
+			data, err := os.ReadFile(filePath)
+			if err == nil {
+				lines := strings.Split(string(data), "\n")
+				for _, l := range lines {
+					l = strings.TrimSpace(l)
+					if l != "" {
+						result = append(result, l)
+					}
+				}
+			} else {
+				result = append(result, "(读取失败)")
+			}
+		}
+		c.String(http.StatusOK, strings.Join(result, "\n"))
 	})
 
 	fmt.Println("Starting Risky IP Filter server on :8080")
@@ -706,7 +770,7 @@ func extractIPFromRequest(c *gin.Context) string {
 func processProjectHoneypotRSS(body io.Reader, ipAssociationChan chan<- IPAssociation) {
 	var feed RSSFeed
 	if err := xml.NewDecoder(body).Decode(&feed); err != nil {
-		fmt.Printf("Error parsing ProjectHoneypot RSS: %v\n", err)
+		fmt.Printf("Error parsing ProjectHoneypot RSS: %v\n, got %s", err, body)
 		return
 	}
 	for _, item := range feed.Channel.Items {
@@ -931,3 +995,85 @@ func isIPAddress(s string) bool {
 
 // isRiskyIP is now effectively replaced by getRiskStatusAndReason for external use.
 // The internal logic is within getRiskStatusAndReason and uses riskySingleIPs and riskyCIDRInfo.
+
+// 定时同步 cloudflare.txt 和 fastly.txt
+func startCDNListSync() {
+	go func() {
+		for {
+			updateCloudflareList()
+			updateFastlyList()
+			time.Sleep(1 * time.Hour)
+		}
+	}()
+}
+
+func updateCloudflareList() {
+	v4url := "https://www.cloudflare.com/ips-v4"
+	v6url := "https://www.cloudflare.com/ips-v6"
+	v4resp, err := http.Get(v4url)
+	if err != nil {
+		log.Printf("cloudflare v4 fetch error: %v", err)
+		return
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			return
+		}
+	}(v4resp.Body)
+	v6resp, err := http.Get(v6url)
+	if err != nil {
+		log.Printf("cloudflare v6 fetch error: %v", err)
+		return
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			return
+		}
+	}(v6resp.Body)
+	v4data, _ := io.ReadAll(v4resp.Body)
+	v6data, _ := io.ReadAll(v6resp.Body)
+	var lines []string
+	lines = append(lines, strings.Split(string(v4data), "\n")...)
+	lines = append(lines, strings.Split(string(v6data), "\n")...)
+	var merged []string
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			merged = append(merged, l)
+		}
+	}
+	err = os.WriteFile("data/cloudflare.txt", []byte(strings.Join(merged, "\n")), 0644)
+	if err != nil {
+		return
+	}
+}
+
+func updateFastlyList() {
+	fastlyUrl := "https://api.fastly.com/public-ip-list"
+	resp, err := http.Get(fastlyUrl)
+	if err != nil {
+		log.Printf("fastly fetch error: %v", err)
+		return
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			return
+		}
+	}(resp.Body)
+	var data struct {
+		Addresses     []string `json:"addresses"`
+		IPv6Addresses []string `json:"ipv6_addresses"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		log.Printf("fastly decode error: %v", err)
+		return
+	}
+	all := append(data.Addresses, data.IPv6Addresses...)
+	err = os.WriteFile("data/fastly.txt", []byte(strings.Join(all, "\n")), 0644)
+	if err != nil {
+		return
+	}
+}
