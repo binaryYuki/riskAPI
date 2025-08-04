@@ -299,9 +299,7 @@ func CorrelationMiddleware() gin.HandlerFunc {
 		c.Set("correlation_id", correlationID)
 		c.Header("X-Correlation-ID", correlationID)
 		// cache-control
-		//private, no-cache, no-store, max-age=0, must-revalidate
-		c.Set("cache-control", "private, no-cache, no-store, max-age=0, must-revalidate")
-		c.Header("cache-control", "private, no-cache, no-store, max-age=0, must-revalidate")
+		c.Header("Cache-Control", "private, no-cache, no-store, max-age=0, must-revalidate")
 		c.Next()
 	}
 }
