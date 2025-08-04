@@ -12,6 +12,8 @@ ARG GO_VERSION=1.23.0
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS build
 WORKDIR /src
 
+COPY data /src/data
+
 # Download dependencies as a separate step to take advantage of Docker's caching.
 # Leverage a cache mount to /go/pkg/mod/ to speed up subsequent builds.
 # Leverage bind mounts to go.sum and go.mod to avoid having to copy them into
@@ -29,9 +31,12 @@ ARG TARGETARCH
 # Leverage a cache mount to /go/pkg/mod/ to speed up subsequent builds.
 # Leverage a bind mount to the current directory to avoid having to copy the
 # source code into the container.
+# 获取 commit hash 和日期，并注入 version 变量
+ARG VERSION
 RUN --mount=type=cache,target=/go/pkg/mod/ \
     --mount=type=bind,target=. \
-    CGO_ENABLED=0 GOARCH=$TARGETARCH go build -o /bin/server .
+    VERSION=$(date +%Y%m%d)_$(git rev-parse --short=6 HEAD) && \
+    CGO_ENABLED=0 GOARCH=$TARGETARCH go build -ldflags "-X main.version=$VERSION" -o /bin/server .
 
 ################################################################################
 # Create a new stage for running the application that contains the minimal
