@@ -363,6 +363,25 @@ func main() {
 
 	go updateIPListsPeriodically(config)
 
+	// 敏感路径拦截
+	router.Use(func(c *gin.Context) {
+		if sensitivePathRegex.MatchString(c.Request.URL.Path) {
+			if c.Request.Method == http.MethodGet {
+				c.Header("Content-Type", "text/html; charset=utf-8")
+				c.Header("X-Content-Type-Options", "nosniff")
+				c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+				c.Header("Pragma", "no-cache")
+				c.Header("Expires", "0")
+				c.Status(http.StatusForbidden)
+				c.File("data/pages/403.html")
+			} else {
+				c.JSON(403, gin.H{"error": "forbidden"})
+			}
+			c.Abort()
+			return
+		}
+	})
+
 	router.POST("/filter-proxies", func(c *gin.Context) {
 		var proxies []Proxy
 		if err := c.ShouldBindJSON(&proxies); err != nil {
@@ -488,26 +507,6 @@ func main() {
 
 	// 5. Gin 自带的恢复中间件（可选）
 	router.Use(gin.Recovery())
-
-	// 敏感路径拦截
-	router.Use(func(c *gin.Context) {
-		if sensitivePathRegex.MatchString(c.Request.URL.Path) {
-			if c.Request.Method == http.MethodGet {
-				c.Header("Content-Type", "text/html; charset=utf-8")
-				c.Header("X-Content-Type-Options", "nosniff")
-				c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-				c.Header("Pragma", "no-cache")
-				c.Header("Expires", "0")
-				c.Status(http.StatusForbidden)
-				c.File("data/pages/403.html")
-			} else {
-				c.JSON(403, gin.H{"error": "forbidden"})
-			}
-			c.Abort()
-			return
-		}
-	})
-
 }
 
 func checkIPHandler(c *gin.Context) {
