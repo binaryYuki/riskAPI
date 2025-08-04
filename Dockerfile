@@ -1,88 +1,57 @@
 # syntax=docker/dockerfile:1
 
-# Comments are provided throughout this file to help you get started.
-# If you need more help, visit the Dockerfile reference guide at
-# https://docs.docker.com/go/dockerfile-reference/
-
-# Want to help us make this template better? Share your feedback here: https://forms.gle/ybq9Krt8jtBL3iCk7
-
 ################################################################################
-# Create a stage for building the application.
+# Builder stage
+################################################################################
 ARG GO_VERSION=1.23.0
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS build
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 WORKDIR /src
 
-COPY data /src/data
+# Install git for commit hash retrieval
+RUN apk add --no-cache git
 
-# Download dependencies as a separate step to take advantage of Docker's caching.
-# Leverage a cache mount to /go/pkg/mod/ to speed up subsequent builds.
-# Leverage bind mounts to go.sum and go.mod to avoid having to copy them into
-# the container.
-RUN --mount=type=cache,target=/go/pkg/mod/ \
-    --mount=type=bind,source=go.sum,target=go.sum \
-    --mount=type=bind,source=go.mod,target=go.mod \
+# Copy project files
+COPY . .
+
+# Cache Go modules
+RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download -x
 
-# This is the architecture you're building for, which is passed in by the builder.
-# Placing it here allows the previous steps to be cached across architectures.
+# Build binary with custom version: YYMMDDHHMM-<commit[:6]>
+ARG TARGETOS
 ARG TARGETARCH
-
-# Build the application.
-# Leverage a cache mount to /go/pkg/mod/ to speed up subsequent builds.
-# Leverage a bind mount to the current directory to avoid having to copy the
-# source code into the container.
-# 获取 commit hash 和日期，并注入 version 变量
-ARG VERSION
-RUN --mount=type=cache,target=/go/pkg/mod/ \
+RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=bind,target=. \
-    VERSION=$(date +%Y%m%d)_$(git rev-parse --short=6 HEAD) && \
-    CGO_ENABLED=0 GOARCH=$TARGETARCH go build -ldflags "-X main.version=$VERSION" -o /bin/server .
+    --mount=type=bind,source=.git,target=.git \
+    VERSION="$(date -u +'%y%m%d%H%M')-$(git rev-parse --short=6 HEAD)" && \
+    CGO_ENABLED=0 \
+    GOOS=$TARGETOS \
+    GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+        -o /bin/server ./...
 
 ################################################################################
-# Create a new stage for running the application that contains the minimal
-# runtime dependencies for the application. This often uses a different base
-# image from the build stage where the necessary files are copied from the build
-# stage.
-#
-# The example below uses the alpine image as the foundation for running the app.
-# By specifying the "latest" tag, it will also use whatever happens to be the
-# most recent version of that image when you build your Dockerfile. If
-# reproducibility is important, consider using a versioned tag
-# (e.g., alpine:3.17.2) or SHA (e.g., alpine@sha256:c41ab5c992deb4fe7e5da09f67a8804a46bd0592bfdf0b1847dde0e0889d2bff).
+# Final runtime stage
+################################################################################
 FROM alpine:latest AS final
 
-# Install any runtime dependencies that are needed to run your application.
-# Leverage a cache mount to /var/cache/apk/ to speed up subsequent builds.
+# Install runtime dependencies
 RUN --mount=type=cache,target=/var/cache/apk \
-    apk --update add \
-        ca-certificates \
-        tzdata \
-        && \
-        update-ca-certificates
+    apk add --no-cache ca-certificates tzdata && \
+    update-ca-certificates
 
-# Create a non-privileged user that the app will run under.
-# See https://docs.docker.com/go/dockerfile-user-best-practices/
+# Create non-root user
 ARG UID=10001
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --home "/nonexistent" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
-    appuser
+RUN adduser -S -u ${UID} appuser
 USER appuser
 
-# Copy the executable from the "build" stage.
-COPY --from=build /bin/server /bin/
+# Copy binary and data
+COPY --from=builder /bin/server /bin/server
+COPY --from=builder /src/data /data
 
-# add cdn data files
-COPY --from=build /src/data /data
+# Remove any stray .git directories (safety net)
+RUN rm -rf /data/.git /src/.git || true
 
-# Expose the port that the application listens on.
 EXPOSE 8080
-
 ENV GIN_MODE=release
-
-# What the container should run when it is started.
-ENTRYPOINT [ "/bin/server" ]
+ENTRYPOINT ["/bin/server"]
