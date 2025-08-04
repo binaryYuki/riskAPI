@@ -794,9 +794,15 @@ func extractIPFromRequest(c *gin.Context) string {
 // They now send IPAssociation to the channel
 
 func processProjectHoneypotRSS(body io.Reader, ipAssociationChan chan<- IPAssociation) {
+	peekBuf := make([]byte, 512)
+	n, _ := body.Read(peekBuf)
+	peek := string(peekBuf[:n])
+	// reconstruct body reader to allow multiple reads
+	feedReader := io.MultiReader(strings.NewReader(peek), body)
+
 	var feed RSSFeed
-	if err := xml.NewDecoder(body).Decode(&feed); err != nil {
-		fmt.Printf("Error parsing ProjectHoneypot RSS: %v\n, got %s", err, body)
+	if err := xml.NewDecoder(feedReader).Decode(&feed); err != nil {
+		fmt.Printf("Error parsing ProjectHoneypot RSS: %v\nPreview: %s\n", err, peek)
 		return
 	}
 	for _, item := range feed.Channel.Items {
