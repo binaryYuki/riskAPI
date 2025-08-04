@@ -71,6 +71,9 @@ USER appuser
 # Copy the executable from the "build" stage.
 COPY --from=build /bin/server /bin/
 
+# add cdn data files
+COPY --from=build /src/data /data
+
 # Expose the port that the application listens on.
 EXPOSE 8080
 
