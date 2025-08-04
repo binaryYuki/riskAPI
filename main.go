@@ -304,6 +304,10 @@ func CorrelationMiddleware() gin.HandlerFunc {
 	}
 }
 
+var version = "dev"
+
+var sensitivePathRegex = regexp.MustCompile(`(?i)^/(\.env|\.git|\.svn|\.hg|\.DS_Store|config\.json|config\.yml|config\.yaml|wp-config\.php|composer\.json|composer\.lock|package\.json|yarn\.lock|docker-compose\.yml|id_rsa|id_rsa\.pub|\.bash_history|\.htaccess|\.htpasswd|\.ssh|\.aws|\.npmrc|\.dockerignore|\.gitignore|\.idea|vendor/.*|node_modules/.*|backup|db\.sqlite|db\.sql|dump\.sql|phpinfo\.php|test\.php|debug\.php|admin|admin\.php|webshell\.php|shell\.php|cmd\.php)$`)
+
 func main() {
 	appCache = cache.New(ipCacheExpiry, 10*time.Minute)
 	riskySingleIPs = make(map[string]bool)
@@ -455,6 +459,10 @@ func main() {
 		c.String(http.StatusOK, strings.Join(result, "\n"))
 	})
 
+	router.GET("/version", func(c *gin.Context) {
+		c.JSON(200, gin.H{"version": version})
+	})
+
 	fmt.Println("Starting Risky IP Filter server on :8080")
 	if err := router.Run(":8080"); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
@@ -480,6 +488,26 @@ func main() {
 
 	// 5. Gin 自带的恢复中间件（可选）
 	router.Use(gin.Recovery())
+
+	// 敏感路径拦截
+	router.Use(func(c *gin.Context) {
+		if sensitivePathRegex.MatchString(c.Request.URL.Path) {
+			if c.Request.Method == http.MethodGet {
+				c.Header("Content-Type", "text/html; charset=utf-8")
+				c.Header("X-Content-Type-Options", "nosniff")
+				c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+				c.Header("Pragma", "no-cache")
+				c.Header("Expires", "0")
+				c.Status(http.StatusForbidden)
+				c.File("data/pages/403.html")
+			} else {
+				c.JSON(403, gin.H{"error": "forbidden"})
+			}
+			c.Abort()
+			return
+		}
+	})
+
 }
 
 func checkIPHandler(c *gin.Context) {
