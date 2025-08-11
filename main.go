@@ -520,12 +520,80 @@ func checkIPHandler(c *gin.Context) {
 		return
 	}
 
+	// CDN/IPC 检查
+	cdns := map[string]string{
+		"edgeone":    "data/cdn/edgeone.txt",
+		"cloudflare": "data/cdn/cloudflare.txt",
+		"fastly":     "data/cdn/fastly.txt",
+	}
+	idcs := map[string]string{
+		"azure":        "data/idc/azure.txt",
+		"aws":          "data/idc/aws.txt",
+		"gcp":          "data/idc/gcp.txt",
+		"oracle":       "data/idc/oracle.txt",
+		"akamai":       "data/idc/akamai.txt",
+		"digitalocean": "data/idc/digitalocean.txt",
+		"linode":       "data/idc/linode.txt",
+		"apple":        "data/idc/apple.txt",
+		"zscaler":      "data/idc/zscaler.txt",
+	}
+	for cdn, path := range cdns {
+		if isIPInList(ip, path) {
+			c.JSON(http.StatusForbidden, Response{Status: "banned", Message: "Behind Proxy: " + cdn + " cdn"})
+			return
+		}
+	}
+	for idc, path := range idcs {
+		if isIPInList(ip, path) {
+			c.JSON(http.StatusForbidden, Response{Status: "banned", Message: "idc ip: " + idc})
+			return
+		}
+	}
+
 	risky, reason := getRiskStatusAndReason(ip)
 	if risky {
 		c.JSON(http.StatusOK, Response{Status: "banned", Message: reason})
 		return
 	}
 	c.JSON(http.StatusOK, Response{Status: "ok", Message: "IP is not listed as risky."})
+}
+
+// 判断 IP 是否在文件列表中
+func isIPInList(ip, filePath string) bool {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return false
+	}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "/") {
+			_, ipnet, err := net.ParseCIDR(line)
+			if err == nil && ipnet.Contains(net.ParseIP(ip)) {
+				err := file.Close()
+				if err != nil {
+					return false
+				}
+				return true
+			}
+		} else {
+			if ip == line {
+				err := file.Close()
+				if err != nil {
+					return false
+				}
+				return true
+			}
+		}
+	}
+	err = file.Close()
+	if err != nil {
+		return false
+	}
+	return false
 }
 
 func checkRequestIPHandler(c *gin.Context) {
