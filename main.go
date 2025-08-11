@@ -597,35 +597,121 @@ func isIPInList(ip, filePath string) bool {
 }
 
 func checkRequestIPHandler(c *gin.Context) {
-	ip := extractIPFromRequest(c)
+	// 优先遍历所有代理头，取第一个非 CDN/IPC 命中的真实 IP
+	candidateHeaders := []string{
+		"X-Forwarded-For", "CF-Connecting-IP", "X-Real-IP", "Fastly-Client-Ip", "X-Client-IP", "X-Cluster-Client-IP", "Forwarded", "True-Client-IP",
+	}
+	var realIP string
+	for _, h := range candidateHeaders {
+		ips := c.Request.Header.Get(h)
+		if ips == "" {
+			continue
+		}
+		for _, ip := range strings.Split(ips, ",") {
+			ip = strings.TrimSpace(ip)
+			if isIPAddress(ip) && !isBogonOrPrivateIP(ip) {
+				// CDN/IDC 检查
+				cdns := map[string]string{
+					"edgeone":    "data/cdn/edgeone.txt",
+					"cloudflare": "data/cdn/cloudflare.txt",
+					"fastly":     "data/cdn/fastly.txt",
+				}
+				idcs := map[string]string{
+					"azure":        "data/idc/azure.txt",
+					"aws":          "data/idc/aws.txt",
+					"gcp":          "data/idc/gcp.txt",
+					"oracle":       "data/idc/oracle.txt",
+					"akamai":       "data/idc/akamai.txt",
+					"digitalocean": "data/idc/digitalocean.txt",
+					"linode":       "data/idc/linode.txt",
+					"apple":        "data/idc/apple.txt",
+					"zscaler":      "data/idc/zscaler.txt",
+				}
+				isCDN := false
+				for _, path := range cdns {
+					if isIPInList(ip, path) {
+						isCDN = true
+						break
+					}
+				}
+				isIDC := false
+				for _, path := range idcs {
+					if isIPInList(ip, path) {
+						isIDC = true
+						break
+					}
+				}
+				if !isCDN && !isIDC {
+					realIP = ip
+					break
+				}
+			}
+		}
+		if realIP != "" {
+			break
+		}
+	}
+	if realIP == "" {
+		realIP = c.ClientIP()
+	}
 
-	if ip == "::1" || ip == "127.0.0.1" { // Common localhost IPs
+	if realIP == "::1" || realIP == "127.0.0.1" {
 		c.JSON(http.StatusOK, ResponseWithIP{
 			Status:  "ok",
 			Message: "Request from localhost.",
-			IP:      ip,
+			IP:      realIP,
 		})
 		return
 	}
-	if !isIPAddress(ip) { // Also catches empty IP string
-		c.JSON(http.StatusBadRequest, ResponseWithIP{Status: "error", Message: "Invalid or unidentifiable IP address.", IP: ip})
+	if !isIPAddress(realIP) {
+		c.JSON(http.StatusBadRequest, ResponseWithIP{Status: "error", Message: "Invalid or unidentifiable IP address.", IP: realIP})
 		return
 	}
-	if isBogonOrPrivateIP(ip) {
-		c.JSON(http.StatusOK, ResponseWithIP{ // Not an error, but info that it's private
+	if isBogonOrPrivateIP(realIP) {
+		c.JSON(http.StatusOK, ResponseWithIP{
 			Status:  "ok",
 			Message: "Request from a private or bogon IP address.",
-			IP:      ip,
+			IP:      realIP,
 		})
 		return
 	}
 
-	risky, reason := getRiskStatusAndReason(ip)
+	// CDN/IDC 检查
+	cdns := map[string]string{
+		"edgeone":    "data/cdn/edgeone.txt",
+		"cloudflare": "data/cdn/cloudflare.txt",
+		"fastly":     "data/cdn/fastly.txt",
+	}
+	idcs := map[string]string{
+		"azure":        "data/idc/azure.txt",
+		"aws":          "data/idc/aws.txt",
+		"gcp":          "data/idc/gcp.txt",
+		"oracle":       "data/idc/oracle.txt",
+		"akamai":       "data/idc/akamai.txt",
+		"digitalocean": "data/idc/digitalocean.txt",
+		"linode":       "data/idc/linode.txt",
+		"apple":        "data/idc/apple.txt",
+		"zscaler":      "data/idc/zscaler.txt",
+	}
+	for cdn, path := range cdns {
+		if isIPInList(realIP, path) {
+			c.JSON(http.StatusForbidden, ResponseWithIP{Status: "banned", Message: "Behind Proxy: " + cdn + " cdn", IP: realIP})
+			return
+		}
+	}
+	for idc, path := range idcs {
+		if isIPInList(realIP, path) {
+			c.JSON(http.StatusForbidden, ResponseWithIP{Status: "banned", Message: "idc ip: " + idc, IP: realIP})
+			return
+		}
+	}
+
+	risky, reason := getRiskStatusAndReason(realIP)
 	if risky {
-		c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: reason, IP: ip})
+		c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: reason, IP: realIP})
 		return
 	}
-	c.JSON(http.StatusOK, ResponseWithIP{Status: "ok", Message: "IP is not listed as risky.", IP: ip})
+	c.JSON(http.StatusOK, ResponseWithIP{Status: "ok", Message: "IP is not listed as risky.", IP: realIP})
 }
 
 // getRiskStatusAndReason checks if an IP is risky and returns its status and reason.
@@ -833,28 +919,6 @@ func fetchIPList(apiURL string, config Config, ipAssociationChan chan<- IPAssoci
 		return
 	}
 	fmt.Printf("Failed to fetch IP list from %s after %d attempts\n", apiURL, config.Retries)
-}
-
-func extractIPFromRequest(c *gin.Context) string {
-	// c.ClientIP() is usually sufficient when trusted proxies are configured.
-	ip := c.ClientIP()
-	// Fallback or additional checks if needed, though Gin's ClientIP is robust.
-	if ip == "" {
-		ip = c.RemoteIP()
-	}
-	// log ip
-	fmt.Printf("Request IP: %s\n", ip)
-	if isIPInFastlyCIDR(ip) {
-		fastlyClientIP := c.Request.Header.Get("Fastly-Client-Ip")
-		if fastlyClientIP != "" && isIPAddress(fastlyClientIP) {
-			return fastlyClientIP
-		}
-		cfConnectingIP := c.Request.Header.Get("CF-Connecting-IP")
-		if cfConnectingIP != "" && isIPAddress(cfConnectingIP) {
-			return cfConnectingIP
-		}
-	}
-	return ip
 }
 
 // Processors for different list formats
