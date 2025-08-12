@@ -78,21 +78,6 @@ var localProxies = []string{
 	"10.42.0.0/8", "10.0.0.0/16", "172.16.0.0/12", "fc00::/7",
 }
 
-func isIPInFastlyCIDR(ip string) bool {
-	ipAddr := net.ParseIP(ip)
-	if ipAddr == nil {
-		return false
-	}
-	fastlyCIDRsMutex.RLock()
-	defer fastlyCIDRsMutex.RUnlock()
-	for _, ipNet := range fastlyCIDRs {
-		if ipNet.Contains(ipAddr) {
-			return true
-		}
-	}
-	return false
-}
-
 func updateFastlyIPs(router *gin.Engine) {
 	for {
 		var ipList FastlyIPList
@@ -599,7 +584,7 @@ func isIPInList(ip, filePath string) bool {
 func checkRequestIPHandler(c *gin.Context) {
 	// 优先遍历所有代理头，取第一个非 CDN/IPC 命中的真实 IP
 	candidateHeaders := []string{
-		"X-Forwarded-For", "CF-Connecting-IP", "X-Real-IP", "Fastly-Client-Ip", "X-Client-IP", "X-Cluster-Client-IP", "Forwarded", "True-Client-IP",
+		"X-Forwarded-For", "CF-Connecting-IP", "X-Real-IP", "Fastly-Client-Ip", "X-Client-IP", "X-Cluster-Client-IP", "Forwarded", "True-Client-IP", "EO-Client-IP",
 	}
 	var realIP string
 	for _, h := range candidateHeaders {
