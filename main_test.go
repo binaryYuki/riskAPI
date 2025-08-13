@@ -96,7 +96,7 @@ func TestCorrelationMiddleware(t *testing.T) {
 		router.ServeHTTP(w, req)
 		id := w.Body.String()
 		assert.NotEmpty(t, id)
-		assert.Equal(t, id, w.Header().Get("X-Correlation-ID"))
+		assert.Equal(t, id, w.Header().Get("X-Request-ID"))
 	})
 
 	t.Run("uses provided correlation id", func(t *testing.T) {
@@ -112,6 +112,6 @@ func TestCorrelationMiddleware(t *testing.T) {
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 		assert.Equal(t, "test-id-123", w.Body.String())
-		assert.Equal(t, "test-id-123", w.Header().Get("X-Correlation-ID"))
+		assert.Equal(t, "test-id-123", w.Header().Get("X-Request-ID"))
 	})
 }
