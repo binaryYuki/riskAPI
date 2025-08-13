@@ -532,13 +532,13 @@ func checkIPHandler(c *gin.Context) {
 	}
 	for cdn, path := range cdns {
 		if isIPInList(ip, path) {
-			c.JSON(http.StatusForbidden, Response{Status: "banned", Message: "Behind Proxy: " + cdn + " cdn"})
+			c.JSON(http.StatusOK, Response{Status: "banned", Message: "Behind Proxy: " + cdn + " cdn"})
 			return
 		}
 	}
 	for idc, path := range idcs {
 		if isIPInList(ip, path) {
-			c.JSON(http.StatusForbidden, Response{Status: "banned", Message: "idc ip: " + idc})
+			c.JSON(http.StatusOK, Response{Status: "banned", Message: "idc ip: " + idc})
 			return
 		}
 	}
@@ -688,13 +688,13 @@ func checkRequestIPHandler(c *gin.Context) {
 	}
 	for cdn, path := range cdns {
 		if isIPInList(realIP, path) {
-			c.JSON(http.StatusForbidden, ResponseWithIP{Status: "banned", Message: "Behind Proxy: " + cdn + " cdn", IP: realIP})
+			c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: "Behind Proxy: " + cdn + " cdn", IP: realIP})
 			return
 		}
 	}
 	for idc, path := range idcs {
 		if isIPInList(realIP, path) {
-			c.JSON(http.StatusForbidden, ResponseWithIP{Status: "banned", Message: "idc ip: " + idc, IP: realIP})
+			c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: "idc ip: " + idc, IP: realIP})
 			return
 		}
 	}
