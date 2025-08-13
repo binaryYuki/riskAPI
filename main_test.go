@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -114,4 +119,113 @@ func TestCorrelationMiddleware(t *testing.T) {
 		assert.Equal(t, "test-id-123", w.Body.String())
 		assert.Equal(t, "test-id-123", w.Header().Get("X-Request-ID"))
 	})
+}
+
+func TestRiskyIPChannels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// edgeone
+	riskyCIDRInfo = []CIDRInfo{}
+	riskySingleIPs = map[string]bool{}
+	reasonMap = map[string]string{}
+	_, edgeoneNet, _ := net.ParseCIDR("1.71.146.0/23")
+	riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: edgeoneNet, OriginalCIDR: "1.71.146.0/23"})
+	reasonMap["1.71.146.0/23"] = "edgeone"
+
+	router := gin.Default()
+	router.GET("/api/v1/ip", checkRequestIPHandler)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/ip", nil)
+	req.RemoteAddr = "1.71.146.1:12345"
+	router.ServeHTTP(w, req)
+	assert.Contains(t, w.Body.String(), "edgeone")
+
+	// fastly
+	riskyCIDRInfo = []CIDRInfo{}
+	riskySingleIPs = map[string]bool{}
+	reasonMap = map[string]string{}
+	_, fastlyNet, _ := net.ParseCIDR("23.235.32.0/20")
+	riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: fastlyNet, OriginalCIDR: "23.235.32.0/20"})
+	reasonMap["23.235.32.0/20"] = "fastly"
+
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodGet, "/api/v1/ip", nil)
+	req2.RemoteAddr = "23.235.32.1:12345"
+	router.ServeHTTP(w2, req2)
+	assert.Contains(t, w2.Body.String(), "fastly")
+}
+
+func getFirstCIDRFromFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func(f *os.File) {
+		err := f.Close()
+		if err != nil {
+			return
+		}
+	}(f)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" && !strings.HasPrefix(line, "//") {
+			return line, nil
+		}
+	}
+	return "", nil
+}
+
+func ipFromCIDR(cidr string) (string, error) {
+	ip, _, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", err
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return ip.String(), nil // fallback for IPv6
+	}
+	ip4[3]++ // 取第一个可用IP
+	return ip4.String(), nil
+}
+
+func TestAllRiskyChannelsAuto(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var testFiles []string
+	err := filepath.Walk("data", func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && strings.HasSuffix(path, ".txt") {
+			testFiles = append(testFiles, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return
+	}
+	for _, file := range testFiles {
+		cidr, err := getFirstCIDRFromFile(file)
+		if err != nil || cidr == "" {
+			continue
+		}
+		ip, err := ipFromCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		// 渠道名用文件名
+		parts := strings.Split(file, string(os.PathSeparator))
+		channel := strings.TrimSuffix(parts[len(parts)-1], ".txt")
+		t.Run(channel, func(t *testing.T) {
+			riskyCIDRInfo = []CIDRInfo{}
+			riskySingleIPs = map[string]bool{}
+			reasonMap = map[string]string{}
+			_, netObj, _ := net.ParseCIDR(cidr)
+			riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: netObj, OriginalCIDR: cidr})
+			reasonMap[cidr] = channel
+			router := gin.Default()
+			router.GET("/api/v1/ip", checkRequestIPHandler)
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequest(http.MethodGet, "/api/v1/ip", nil)
+			req.RemoteAddr = ip + ":12345"
+			router.ServeHTTP(w, req)
+			assert.Contains(t, w.Body.String(), channel)
+		})
+	}
 }
