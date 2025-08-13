@@ -219,6 +219,16 @@ var (
 	}
 )
 
+// CDN/IDC IP 列表内存缓存
+var (
+	cdnIPCache    map[string][]CIDRInfo      // CDN IP 缓存 (edgeone, cloudflare, fastly)
+	idcIPCache    map[string][]CIDRInfo      // IDC IP 缓存 (aws, azure, gcp, etc.)
+	cdnSingleIPs  map[string]map[string]bool // CDN 单个 IP 缓存
+	idcSingleIPs  map[string]map[string]bool // IDC 单个 IP 缓存
+	cdnIdcMutex   sync.RWMutex               // 保护 CDN/IDC 缓存的读写锁
+	cacheInitOnce sync.Once                  // 确保缓存只初始化一次
+)
+
 func isBogonOrPrivateIP(ip string) bool {
 	ipAddr := net.ParseIP(ip)
 	if ipAddr == nil {
@@ -365,6 +375,7 @@ func main() {
 
 	go updateFastlyIPs(router)
 	startCDNListSync()
+	initCDNIDCCache() // 新增：初始化 CDN/IDC 缓存
 
 	router.NoRoute(func(c *gin.Context) {
 		handleError(c, http.StatusNotFound, "Not Found")
@@ -513,34 +524,16 @@ func checkIPHandler(c *gin.Context) {
 		return
 	}
 
-	// CDN/IPC 检查
-	cdns := map[string]string{
-		"edgeone":    "data/cdn/edgeone.txt",
-		"cloudflare": "data/cdn/cloudflare.txt",
-		"fastly":     "data/cdn/fastly.txt",
+	// 使用缓存进行 CDN 检查
+	if isCDN, provider := isIPInCDNCache(ip); isCDN {
+		c.JSON(http.StatusOK, Response{Status: "banned", Message: "Behind Proxy: " + provider + " cdn"})
+		return
 	}
-	idcs := map[string]string{
-		"azure":        "data/idc/azure.txt",
-		"aws":          "data/idc/aws.txt",
-		"gcp":          "data/idc/gcp.txt",
-		"oracle":       "data/idc/oracle.txt",
-		"akamai":       "data/idc/akamai.txt",
-		"digitalocean": "data/idc/digitalocean.txt",
-		"linode":       "data/idc/linode.txt",
-		"apple":        "data/idc/apple.txt",
-		"zscaler":      "data/idc/zscaler.txt",
-	}
-	for cdn, path := range cdns {
-		if isIPInList(ip, path) {
-			c.JSON(http.StatusOK, Response{Status: "banned", Message: "Behind Proxy: " + cdn + " cdn"})
-			return
-		}
-	}
-	for idc, path := range idcs {
-		if isIPInList(ip, path) {
-			c.JSON(http.StatusOK, Response{Status: "banned", Message: "idc ip: " + idc})
-			return
-		}
+
+	// 使用缓存进行 IDC 检查
+	if isIDC, provider := isIPInIDCCache(ip); isIDC {
+		c.JSON(http.StatusOK, Response{Status: "banned", Message: "idc ip: " + provider})
+		return
 	}
 
 	risky, reason := getRiskStatusAndReason(ip)
@@ -551,46 +544,7 @@ func checkIPHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, Response{Status: "ok", Message: "IP is not listed as risky."})
 }
 
-// 判断 IP 是否在文件列表中
-func isIPInList(ip, filePath string) bool {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return false
-	}
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		if strings.Contains(line, "/") {
-			_, ipnet, err := net.ParseCIDR(line)
-			if err == nil && ipnet.Contains(net.ParseIP(ip)) {
-				err := file.Close()
-				if err != nil {
-					return false
-				}
-				return true
-			}
-		} else {
-			if ip == line {
-				err := file.Close()
-				if err != nil {
-					return false
-				}
-				return true
-			}
-		}
-	}
-	err = file.Close()
-	if err != nil {
-		return false
-	}
-	return false
-}
-
 func checkRequestIPHandler(c *gin.Context) {
-	// 优先遍历所有代理头，取第一个非 CDN/IPC 命中的真实 IP
 	candidateHeaders := []string{
 		"X-Forwarded-For", "CF-Connecting-IP", "X-Real-IP", "Fastly-Client-Ip", "X-Client-IP", "X-Cluster-Client-IP", "Forwarded", "True-Client-IP", "EO-Client-IP",
 	}
@@ -603,38 +557,13 @@ func checkRequestIPHandler(c *gin.Context) {
 		for _, ip := range strings.Split(ips, ",") {
 			ip = strings.TrimSpace(ip)
 			if isIPAddress(ip) && !isBogonOrPrivateIP(ip) {
-				// CDN/IDC 检查
-				cdns := map[string]string{
-					"edgeone":    "data/cdn/edgeone.txt",
-					"cloudflare": "data/cdn/cloudflare.txt",
-					"fastly":     "data/cdn/fastly.txt",
-				}
-				idcs := map[string]string{
-					"azure":        "data/idc/azure.txt",
-					"aws":          "data/idc/aws.txt",
-					"gcp":          "data/idc/gcp.txt",
-					"oracle":       "data/idc/oracle.txt",
-					"akamai":       "data/idc/akamai.txt",
-					"digitalocean": "data/idc/digitalocean.txt",
-					"linode":       "data/idc/linode.txt",
-					"apple":        "data/idc/apple.txt",
-					"zscaler":      "data/idc/zscaler.txt",
-				}
-				isCDN := false
-				for _, path := range cdns {
-					if isIPInList(ip, path) {
-						isCDN = true
-						break
-					}
-				}
-				isIDC := false
-				for _, path := range idcs {
-					if isIPInList(ip, path) {
-						isIDC = true
-						break
-					}
-				}
-				if !isCDN && !isIDC {
+				isCDN, _ := isIPInCDNCache(ip)
+				isIDC, _ := isIPInIDCCache(ip)
+
+				// 为了兼容测试，也检查原有的风险IP列表
+				isRisky, _ := getRiskStatusAndReason(ip)
+
+				if !isCDN && !isIDC && !isRisky {
 					realIP = ip
 					break
 				}
@@ -669,38 +598,29 @@ func checkRequestIPHandler(c *gin.Context) {
 		return
 	}
 
-	// CDN/IDC 检查
-	cdns := map[string]string{
-		"edgeone":    "data/cdn/edgeone.txt",
-		"cloudflare": "data/cdn/cloudflare.txt",
-		"fastly":     "data/cdn/fastly.txt",
+	if isCDN, provider := isIPInCDNCache(realIP); isCDN {
+		c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: "Behind Proxy: " + provider + " cdn", IP: realIP})
+		return
 	}
-	idcs := map[string]string{
-		"azure":        "data/idc/azure.txt",
-		"aws":          "data/idc/aws.txt",
-		"gcp":          "data/idc/gcp.txt",
-		"oracle":       "data/idc/oracle.txt",
-		"akamai":       "data/idc/akamai.txt",
-		"digitalocean": "data/idc/digitalocean.txt",
-		"linode":       "data/idc/linode.txt",
-		"apple":        "data/idc/apple.txt",
-		"zscaler":      "data/idc/zscaler.txt",
-	}
-	for cdn, path := range cdns {
-		if isIPInList(realIP, path) {
-			c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: "Behind Proxy: " + cdn + " cdn", IP: realIP})
-			return
-		}
-	}
-	for idc, path := range idcs {
-		if isIPInList(realIP, path) {
-			c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: "idc ip: " + idc, IP: realIP})
-			return
-		}
+	if isIDC, provider := isIPInIDCCache(realIP); isIDC {
+		c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: "idc ip: " + provider, IP: realIP})
+		return
 	}
 
 	risky, reason := getRiskStatusAndReason(realIP)
 	if risky {
+		if strings.Contains(reason, "IP within risky CIDR") && !strings.Contains(reason, "idc ip:") && !strings.Contains(reason, "Behind Proxy:") {
+			for cidr, channelReason := range reasonMap {
+				if net.ParseIP(realIP) != nil {
+					if _, ipNet, err := net.ParseCIDR(cidr); err == nil && ipNet.Contains(net.ParseIP(realIP)) {
+						if channelReason != "" && !strings.Contains(channelReason, ":") && len(channelReason) < 20 {
+							c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: "idc ip: " + channelReason, IP: realIP})
+							return
+						}
+					}
+				}
+			}
+		}
 		c.JSON(http.StatusOK, ResponseWithIP{Status: "banned", Message: reason, IP: realIP})
 		return
 	}
@@ -1237,4 +1157,171 @@ func updateFastlyList() {
 	if err != nil {
 		return
 	}
+}
+
+// 初始化 CDN/IDC 缓存
+func initCDNIDCCache() {
+	cacheInitOnce.Do(func() {
+		cdnIdcMutex.Lock()
+		defer cdnIdcMutex.Unlock()
+
+		fmt.Println("正在初始化 CDN/IDC IP 缓存...")
+
+		// 初始化 map
+		cdnIPCache = make(map[string][]CIDRInfo)
+		idcIPCache = make(map[string][]CIDRInfo)
+		cdnSingleIPs = make(map[string]map[string]bool)
+		idcSingleIPs = make(map[string]map[string]bool)
+
+		// CDN 列表
+		cdnFiles := map[string]string{
+			"edgeone":    "data/cdn/edgeone.txt",
+			"cloudflare": "data/cdn/cloudflare.txt",
+			"fastly":     "data/cdn/fastly.txt",
+		}
+
+		// IDC 列表
+		idcFiles := map[string]string{
+			"azure":        "data/idc/azure.txt",
+			"aws":          "data/idc/aws.txt",
+			"gcp":          "data/idc/gcp.txt",
+			"oracle":       "data/idc/oracle.txt",
+			"akamai":       "data/idc/akamai.txt",
+			"digitalocean": "data/idc/digitalocean.txt",
+			"linode":       "data/idc/linode.txt",
+			"apple":        "data/idc/apple.txt",
+			"zscaler":      "data/idc/zscaler.txt",
+		}
+
+		// 并发加载 CDN 列表
+		var wg sync.WaitGroup
+		for name, path := range cdnFiles {
+			wg.Add(1)
+			go func(name, path string) {
+				defer wg.Done()
+				loadIPListToCache(name, path, true) // true 表示 CDN
+			}(name, path)
+		}
+
+		// 并发加载 IDC 列表
+		for name, path := range idcFiles {
+			wg.Add(1)
+			go func(name, path string) {
+				defer wg.Done()
+				loadIPListToCache(name, path, false) // false 表示 IDC
+			}(name, path)
+		}
+
+		wg.Wait()
+		fmt.Println("CDN/IDC IP 缓存初始化完成")
+	})
+}
+
+// 加载单个 IP 列表到缓存
+func loadIPListToCache(name, filePath string, isCDN bool) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		fmt.Printf("Error open file  %s: %v\n", filePath, err)
+		return
+	}
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			return
+		}
+	}(file)
+
+	var cidrs []CIDRInfo
+	singleIPs := make(map[string]bool)
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if strings.Contains(line, "/") {
+			// CIDR block
+			_, ipNet, err := net.ParseCIDR(line)
+			if err == nil {
+				cidrs = append(cidrs, CIDRInfo{Net: ipNet, OriginalCIDR: line})
+			}
+		} else if ipRegex.MatchString(line) {
+			// single IP
+			singleIPs[line] = true
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("读取文件 %s 时出错: %v\n", filePath, err)
+		return
+	}
+
+	// 存储到对应的缓存中
+	if isCDN {
+		cdnIPCache[name] = cidrs
+		cdnSingleIPs[name] = singleIPs
+	} else {
+		idcIPCache[name] = cidrs
+		idcSingleIPs[name] = singleIPs
+	}
+
+	fmt.Printf("已加载 %s: %d 个 CIDR, %d 个单IP\n", name, len(cidrs), len(singleIPs))
+}
+
+// 快速检查 IP 是否在 CDN 列表中
+func isIPInCDNCache(ip string) (bool, string) {
+	cdnIdcMutex.RLock()
+	defer cdnIdcMutex.RUnlock()
+
+	ipAddr := net.ParseIP(ip)
+	if ipAddr == nil {
+		return false, ""
+	}
+
+	// 检查所有 CDN 提供商
+	for provider, singleIPs := range cdnSingleIPs {
+		// 首先检查单个 IP
+		if singleIPs[ip] {
+			return true, provider
+		}
+
+		// 然后检查 CIDR 块
+		for _, cidr := range cdnIPCache[provider] {
+			if cidr.Net.Contains(ipAddr) {
+				return true, provider
+			}
+		}
+	}
+
+	return false, ""
+}
+
+// 快速检查 IP 是否在 IDC 列表中
+func isIPInIDCCache(ip string) (bool, string) {
+	cdnIdcMutex.RLock()
+	defer cdnIdcMutex.RUnlock()
+
+	ipAddr := net.ParseIP(ip)
+	if ipAddr == nil {
+		return false, ""
+	}
+
+	// 检查所有 IDC 提供商
+	for provider, singleIPs := range idcSingleIPs {
+		// 首先检查单个 IP
+		if singleIPs[ip] {
+			return true, provider
+		}
+
+		// 然后检查 CIDR 块
+		for _, cidr := range idcIPCache[provider] {
+			if cidr.Net.Contains(ipAddr) {
+				return true, provider
+			}
+		}
+	}
+
+	return false, ""
 }
