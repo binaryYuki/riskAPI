@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-var fastlyCIDRs []*net.IPNet
+var _ []*net.IPNet
 var fastlyCIDRsMutex sync.RWMutex
 
 var (
@@ -66,6 +66,11 @@ type Config struct {
 	Retries     int `json:"retries"`
 	RetryDelay  int `json:"retry_delay"`
 	Concurrency int `json:"concurrency"` // Note: This Concurrency is not currently used to limit fetcher goroutines
+}
+
+// WelcomeJson root handler
+type WelcomeJson struct {
+	Msg string `json:"message"`
 }
 
 // Proxy represents a proxy configuration
@@ -129,7 +134,7 @@ func updateFastlyIPs(router *gin.Engine) {
 		cidrs = append(cidrs, parseCIDRs(ipList.IPv6Addresses)...)
 
 		fastlyCIDRsMutex.Lock()
-		fastlyCIDRs = cidrs
+		_ = cidrs
 		fastlyCIDRsMutex.Unlock()
 		fmt.Printf("Updated fastlyCIDRs: %d entries\n", len(cidrs))
 
@@ -282,7 +287,7 @@ func CorrelationMiddleware() gin.HandlerFunc {
 			correlationID = uuid.New().String()
 		}
 		c.Set("correlation_id", correlationID)
-		c.Header("X-Correlation-ID", correlationID)
+		c.Header("X-Request-ID", correlationID)
 		// cache-control
 		c.Header("Cache-Control", "private, no-cache, no-store, max-age=0, must-revalidate")
 		c.Next()
@@ -299,7 +304,7 @@ func main() {
 	riskyCIDRInfo = make([]CIDRInfo, 0)
 	reasonMap = make(map[string]string)
 
-	allowedDomains := getAllowedDomains()
+	allowedDomains := getAllowedDomains() // 环境变量 ALLOWED_CORS 配置的域名
 
 	config := Config{
 		Timeout:     10000, // milliseconds
@@ -307,21 +312,6 @@ func main() {
 		RetryDelay:  2000, // milliseconds
 		Concurrency: 10,   // Max concurrent goroutines for proxy filtering, not IP list fetching
 	}
-
-	router := gin.Default()
-
-	// It's important to set trusted proxies if running behind a reverse proxy
-	//err := router.SetTrustedProxies([]string{"10.42.0.0/16", "10.0.0.0/16", "172.16.0.0/12", "fc00::/7"})
-	//if err != nil {
-	//	log.Fatalf("Failed to set trusted proxies: %v", err)
-	//}
-
-	go updateFastlyIPs(router)
-	startCDNListSync()
-
-	router.NoRoute(func(c *gin.Context) {
-		handleError(c, http.StatusNotFound, "Not Found")
-	})
 
 	corsConfig := cors.Config{
 		AllowOriginFunc: func(origin string) bool {
@@ -344,7 +334,46 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}
+
+	router := gin.New()
+
+	router.Use(gin.Recovery())
 	router.Use(cors.New(corsConfig))
+	router.Use(CorrelationMiddleware())
+	// 日志中间件
+	router.Use(func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		latency := time.Since(start)
+		status := c.Writer.Status()
+		correlationID, _ := c.Get("correlation_id")
+		log.Printf("[GIN] %s | %3d | %13v | %-15s | %-20s | correlation_id=%v",
+			time.Now().Format("2006/01/02 - 15:04:05"),
+			status,
+			latency,
+			c.ClientIP(),
+			c.Request.URL.Path,
+			correlationID,
+		)
+	})
+
+	// It's important to set trusted proxies if running behind a reverse proxy
+	//err := router.SetTrustedProxies([]string{"10.42.0.0/16", "10.0.0.0/16", "172.16.0.0/12", "fc00::/7"})
+	//if err != nil {
+	//	log.Fatalf("Failed to set trusted proxies: %v", err)
+	//}
+
+	go updateFastlyIPs(router)
+	startCDNListSync()
+
+	router.NoRoute(func(c *gin.Context) {
+		handleError(c, http.StatusNotFound, "Not Found")
+	})
+
+	router.GET("/", func(c *gin.Context) {
+		c.IndentedJSON(http.StatusMisdirectedRequest,
+			WelcomeJson{Msg: "Welcome to Catyuki's Risky IP Filter API. Use /api/v1/ip to check IPs."})
+	})
 
 	go updateIPListsPeriodically(config)
 
@@ -395,7 +424,7 @@ func main() {
 		count := len(riskySingleIPs) + len(riskyCIDRInfo)
 		riskyDataMutex.RUnlock()
 
-		c.JSON(http.StatusOK, Response{
+		c.IndentedJSON(http.StatusOK, Response{
 			Status: "ok",
 			Message: StatusCountMsg{
 				Timestamp: time.Now().Unix(),
@@ -471,27 +500,6 @@ func main() {
 	if err := router.Run(":8080"); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
-	router.Use(CorrelationMiddleware())
-	// 4. 自定义日志中间件
-	router.Use(func(c *gin.Context) {
-		start := time.Now()
-		c.Next()
-		latency := time.Since(start)
-		status := c.Writer.Status()
-
-		correlationID, _ := c.Get("correlation_id")
-		log.Printf("[GIN] %s | %3d | %13v | %-15s | %-20s | correlation_id=%v",
-			time.Now().Format("2006/01/02 - 15:04:05"),
-			status,
-			latency,
-			c.ClientIP(),
-			c.Request.URL.Path,
-			correlationID,
-		)
-	})
-
-	// 5. Gin 自带的恢复中间件（可选）
-	router.Use(gin.Recovery())
 }
 
 func checkIPHandler(c *gin.Context) {
@@ -641,7 +649,7 @@ func checkRequestIPHandler(c *gin.Context) {
 	}
 
 	if realIP == "::1" || realIP == "127.0.0.1" {
-		c.JSON(http.StatusOK, ResponseWithIP{
+		c.IndentedJSON(http.StatusOK, ResponseWithIP{
 			Status:  "ok",
 			Message: "Request from localhost.",
 			IP:      realIP,
@@ -649,11 +657,11 @@ func checkRequestIPHandler(c *gin.Context) {
 		return
 	}
 	if !isIPAddress(realIP) {
-		c.JSON(http.StatusBadRequest, ResponseWithIP{Status: "error", Message: "Invalid or unidentifiable IP address.", IP: realIP})
+		c.IndentedJSON(http.StatusBadRequest, ResponseWithIP{Status: "error", Message: "Invalid or unidentifiable IP address.", IP: realIP})
 		return
 	}
 	if isBogonOrPrivateIP(realIP) {
-		c.JSON(http.StatusOK, ResponseWithIP{
+		c.IndentedJSON(http.StatusOK, ResponseWithIP{
 			Status:  "ok",
 			Message: "Request from a private or bogon IP address.",
 			IP:      realIP,
