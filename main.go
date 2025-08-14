@@ -208,7 +208,6 @@ var (
 		"https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level3.netset",
 		"https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level4.netset",
 		"https://blocklist.greensnow.co/greensnow.txt",
-		"https://checktor.483300.xyz/exit-addresses",
 		"https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/8.txt",
 		"https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/7.txt",
 		"https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/6.txt",
