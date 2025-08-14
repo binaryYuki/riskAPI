@@ -293,8 +293,14 @@ func CorrelationMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		correlationID := c.GetHeader("X-Correlation-ID")
 		if correlationID == "" {
-			correlationID = uuid.New().String()
+			id, err := uuid.NewV7()
+			if err != nil {
+				correlationID = uuid.New().String() + "vtc" // Fallback to a random UUID if V7 is not available
+			} else {
+				correlationID = id.String()
+			}
 		}
+		correlationID = strings.ReplaceAll(correlationID, "-", "")
 		c.Set("correlation_id", correlationID)
 		c.Header("X-Request-ID", correlationID)
 		// cache-control
