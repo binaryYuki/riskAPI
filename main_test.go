@@ -113,11 +113,11 @@ func TestCorrelationMiddleware(t *testing.T) {
 			c.String(http.StatusOK, "%v", id)
 		})
 		req, _ := http.NewRequest(http.MethodGet, "/test-correlation", nil)
-		req.Header.Set("X-Correlation-ID", "test-id-123")
+		req.Header.Set("X-Correlation-ID", "testid123")
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
-		assert.Equal(t, "test-id-123", w.Body.String())
-		assert.Equal(t, "test-id-123", w.Header().Get("X-Request-ID"))
+		assert.Equal(t, "testid123", w.Body.String())
+		assert.Equal(t, "testid123", w.Header().Get("X-Request-ID"))
 	})
 }
 
