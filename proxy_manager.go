@@ -53,12 +53,7 @@ func loadIPListFromFile(filePath, provider string, isCDN bool) {
 		fmt.Printf("Warning: Could not open %s: %v\n", filePath, err)
 		return
 	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			return
-		}
-	}(file)
+	defer func(file *os.File) { _ = file.Close() }(file)
 
 	var cidrs []CIDRInfo
 	singleIPs := make(map[string]bool)
@@ -70,12 +65,11 @@ func loadIPListFromFile(filePath, provider string, isCDN bool) {
 			continue
 		}
 
-		if cidrRegex.MatchString(line) {
-			_, ipNet, err := net.ParseCIDR(line)
-			if err == nil {
-				cidrs = append(cidrs, CIDRInfo{Net: ipNet, OriginalCIDR: line})
-			}
-		} else if ipRegex.MatchString(line) {
+		if _, ipNet, err := net.ParseCIDR(line); err == nil {
+			cidrs = append(cidrs, CIDRInfo{Net: ipNet, OriginalCIDR: line})
+			continue
+		}
+		if ip := net.ParseIP(line); ip != nil {
 			singleIPs[line] = true
 		}
 	}
@@ -149,24 +143,27 @@ func processProxies(proxies []Proxy, concurrency int) []Proxy {
 
 // extractIPFromProxy extracts IP address from proxy server string
 func extractIPFromProxy(server string) string {
-	// Remove protocol if present
 	if strings.Contains(server, "://") {
 		parts := strings.Split(server, "://")
 		if len(parts) > 1 {
 			server = parts[1]
 		}
 	}
-
-	// Remove port if present
-	if strings.Contains(server, ":") {
-		parts := strings.Split(server, ":")
-		server = parts[0]
+	// IPv6 with port like [2001:db8::1]:8080
+	if strings.HasPrefix(server, "[") {
+		if idx := strings.Index(server, "]"); idx != -1 {
+			candidate := server[1:idx]
+			if net.ParseIP(candidate) != nil {
+				return candidate
+			}
+		}
 	}
-
-	// Validate IP format
-	if ipRegex.MatchString(server) {
+	// Strip port (last colon for IPv4 or host:port); IPv6 without [] is ambiguous, rely on [] format.
+	if i := strings.LastIndex(server, ":"); i != -1 && !strings.Contains(server, "]") {
+		server = server[:i]
+	}
+	if net.ParseIP(server) != nil {
 		return server
 	}
-
 	return ""
 }

@@ -3,16 +3,9 @@ package main
 import (
 	"encoding/xml"
 	"net"
-	"regexp"
 	"sync"
 
 	"github.com/patrickmn/go-cache"
-)
-
-// Regular expressions
-var (
-	ipRegex   = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}$`)
-	cidrRegex = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}$`)
 )
 
 // FastlyIPList represents Fastly IP list structure

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -16,8 +17,8 @@ var version = "dev"
 func checkIPHandler(c *gin.Context) {
 	ip := c.Param("ip")
 
-	// Validate IP format
-	if !ipRegex.MatchString(ip) {
+	// Validate IP format (IPv4 / IPv6)
+	if net.ParseIP(ip) == nil {
 		handleError(c, http.StatusBadRequest, "Invalid IP address format")
 		return
 	}
@@ -77,7 +78,7 @@ func checkRequestIPHandler(c *gin.Context) {
 	ip := getClientIPFromCDNHeaders(c)
 
 	// Validate IP format
-	if !ipRegex.MatchString(ip) {
+	if net.ParseIP(ip) == nil {
 		handleError(c, http.StatusBadRequest, "Invalid or unidentifiable IP address.")
 		return
 	}

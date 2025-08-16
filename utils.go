@@ -81,13 +81,19 @@ func parseCIDRs(cidrStrs []string) []*net.IPNet {
 func isBogonOrPrivateIP(ip string) bool {
 	ipAddr := net.ParseIP(ip)
 	if ipAddr == nil {
-		return false // Invalid IP format cannot be bogon/private in this context
+		return false
 	}
 
 	privateIPBlocks := []string{
-		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", // RFC 1918
+		// IPv4 RFC1918 & loopback & link-local
+		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
 		"127.0.0.0/8",    // Loopback
 		"169.254.0.0/16", // Link-local
+		// IPv6 private / loopback / link-local / unique local
+		"::1/128",       // Loopback
+		"fe80::/10",     // Link-local unicast
+		"fc00::/7",      // Unique local
+		"::ffff:0:0/96", // IPv4-mapped (treat as private/bogon contextually)
 	}
 
 	for _, cidr := range privateIPBlocks {
@@ -98,16 +104,13 @@ func isBogonOrPrivateIP(ip string) bool {
 	}
 
 	bogonIPBlocks := []string{
-		"0.0.0.0/8",          // Current network (only valid as source address)
-		"100.64.0.0/10",      // Shared Address Space
-		"192.0.0.0/24",       // IANA IPv4 Special Purpose Address Registry
-		"192.0.2.0/24",       // TEST-NET-1, documentation and examples
-		"198.18.0.0/15",      // Network Interconnect Device Benchmark Testing
-		"198.51.100.0/24",    // TEST-NET-2, documentation and examples
-		"203.0.113.0/24",     // TEST-NET-3, documentation and examples
-		"224.0.0.0/4",        // Multicast
-		"240.0.0.0/4",        // Reserved for Future Use
-		"255.255.255.255/32", // Broadcast
+		// IPv4 bogons
+		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
+		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4", "255.255.255.255/32",
+		// IPv6 bogon / special ranges
+		"::/128",        // Unspecified
+		"2001:db8::/32", // Documentation
+		"ff00::/8",      // Multicast
 	}
 
 	for _, cidr := range bogonIPBlocks {

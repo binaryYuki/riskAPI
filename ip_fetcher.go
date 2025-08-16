@@ -190,7 +190,14 @@ func parseRSSResponse(resp *http.Response, sourceID string, ipAssociationChan ch
 		lines := strings.Split(item.Description, "\n")
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
-			if ipRegex.MatchString(line) {
+			if line == "" {
+				continue
+			}
+			if _, _, err := net.ParseCIDR(line); err == nil {
+				ipAssociationChan <- IPAssociation{Entry: line, Reason: sourceID}
+				continue
+			}
+			if net.ParseIP(line) != nil {
 				ipAssociationChan <- IPAssociation{Entry: line, Reason: sourceID}
 			}
 		}
@@ -214,10 +221,13 @@ func parseTextResponse(resp *http.Response, sourceID string, ipAssociationChan c
 			}
 		}
 
-		// Handle CIDR notation
-		if cidrRegex.MatchString(line) {
+		// Try CIDR parse (IPv4 / IPv6)
+		if _, _, err := net.ParseCIDR(line); err == nil {
 			ipAssociationChan <- IPAssociation{Entry: line, Reason: sourceID}
-		} else if ipRegex.MatchString(line) {
+			continue
+		}
+		// Try single IP parse
+		if net.ParseIP(line) != nil {
 			ipAssociationChan <- IPAssociation{Entry: line, Reason: sourceID}
 		}
 	}
@@ -233,13 +243,12 @@ func processIPAssociations(ipAssociations []IPAssociation) {
 		entry := association.Entry
 		reason := association.Reason
 
-		if cidrRegex.MatchString(entry) {
-			_, ipNet, err := net.ParseCIDR(entry)
-			if err == nil {
-				newCIDRInfo = append(newCIDRInfo, CIDRInfo{Net: ipNet, OriginalCIDR: entry})
-				newReasonMap[entry] = reason
-			}
-		} else if ipRegex.MatchString(entry) {
+		if _, ipNet, err := net.ParseCIDR(entry); err == nil {
+			newCIDRInfo = append(newCIDRInfo, CIDRInfo{Net: ipNet, OriginalCIDR: entry})
+			newReasonMap[entry] = reason
+			continue
+		}
+		if net.ParseIP(entry) != nil { // single IP (v4 or v6)
 			newSingleIPs[entry] = true
 			newReasonMap[entry] = reason
 		}
