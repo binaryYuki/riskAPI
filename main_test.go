@@ -37,7 +37,7 @@ func TestCheckRequestIPHandler(t *testing.T) {
 			name:       "localhost",
 			remoteAddr: "127.0.0.1:12345",
 			wantCode:   http.StatusOK,
-			wantBody:   `{"status":"ok","message":"Request from localhost.","ip":"127.0.0.1"}`,
+			wantBody:   `{"status":"ok","message":"Client IP is not risky (private/bogon)","ip":"127.0.0.1"}`,
 		},
 		{
 			name:       "invalid ip",
@@ -49,7 +49,7 @@ func TestCheckRequestIPHandler(t *testing.T) {
 			name:       "private ip",
 			remoteAddr: "192.168.1.1:12345",
 			wantCode:   http.StatusOK,
-			wantBody:   `{"status":"ok","message":"Request from a private or bogon IP address.","ip":"192.168.1.1"}`,
+			wantBody:   `{"status":"ok","message":"Client IP is not risky (private/bogon)","ip":"192.168.1.1"}`,
 		},
 		{
 			name:       "risky ip",
