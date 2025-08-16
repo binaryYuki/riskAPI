@@ -282,7 +282,7 @@ func getAllowedDomains() []string {
 }
 
 func handleError(c *gin.Context, statusCode int, message string) {
-	c.JSON(statusCode, Response{
+	c.IndentedJSON(statusCode, Response{
 		Status:  "error",
 		Message: message,
 	})
