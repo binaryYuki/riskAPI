@@ -4,7 +4,55 @@ import (
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"net"
+	"strings"
 )
+
+// getClientIPFromCDNHeaders 优先从各大CDN的header中获取客户端IP
+func getClientIPFromCDNHeaders(c *gin.Context) string {
+	// CDN headers priority order (从高到低优先级)
+	cdnHeaders := []string{
+		"CF-Connecting-IP",         // Cloudflare
+		"X-Forwarded-For",          // Standard proxy header
+		"X-Real-IP",                // Nginx proxy
+		"X-Client-IP",              // Apache mod_remoteip
+		"X-Forwarded",              // RFC 7239
+		"X-Cluster-Client-IP",      // Cluster
+		"Forwarded-For",            // RFC 7239
+		"Forwarded",                // RFC 7239
+		"True-Client-IP",           // Akamai and CloudFlare
+		"X-Original-Forwarded-For", // AWS ALB
+		"X-Azure-ClientIP",         // Azure
+		"X-Azure-SocketIP",         // Azure
+		"Fastly-Client-IP",         // Fastly
+		"X-Varnish-Client-IP",      // Varnish
+		"WL-Proxy-Client-IP",       // WebLogic
+		"Proxy-Client-IP",          // Proxy
+		"HTTP_CLIENT_IP",           // Client IP
+		"HTTP_X_FORWARDED_FOR",     // X-Forwarded-For variant
+	}
+
+	for _, header := range cdnHeaders {
+		headerValue := c.GetHeader(header)
+		if headerValue != "" {
+			// Handle comma-separated IPs (like X-Forwarded-For)
+			ips := strings.Split(headerValue, ",")
+			for _, ip := range ips {
+				ip = strings.TrimSpace(ip)
+				if ip != "" && isValidIP(ip) && !isBogonOrPrivateIP(ip) {
+					return ip
+				}
+			}
+		}
+	}
+
+	// 如果CDN headers中没有找到有效IP，则使用gin的ClientIP()作为fallback
+	return c.ClientIP()
+}
+
+// isValidIP 检查IP地址格式是否有效
+func isValidIP(ip string) bool {
+	return net.ParseIP(ip) != nil
+}
 
 // handleError sends error response
 func handleError(c *gin.Context, statusCode int, message string) {

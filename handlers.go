@@ -74,7 +74,7 @@ func checkIPHandler(c *gin.Context) {
 
 // checkRequestIPHandler checks the request's source IP
 func checkRequestIPHandler(c *gin.Context) {
-	ip := c.ClientIP()
+	ip := getClientIPFromCDNHeaders(c)
 
 	// Validate IP format
 	if !ipRegex.MatchString(ip) {
