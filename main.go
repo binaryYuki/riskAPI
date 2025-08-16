@@ -509,7 +509,7 @@ func main() {
 	})
 
 	router.GET("/version", func(c *gin.Context) {
-		c.JSON(200, gin.H{"version": version})
+		c.IndentedJSON(200, gin.H{"version": version})
 	})
 
 	fmt.Println("Starting Risky IP Filter server on :8080")
