@@ -90,4 +90,6 @@ func setupRoutes(router *gin.Engine) {
 	// CDN routes
 	router.GET("/cdn/:name", cdnHandler)
 	router.GET("/cdn/all", cdnAllHandler)
+
+	router.GET("/api/metrics", metricsHandler)
 }
