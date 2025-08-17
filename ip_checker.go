@@ -102,7 +102,7 @@ func getSourceIdentifier(apiURL string) string {
 	} else if strings.Contains(apiURL, "dan.me.uk/torlist") {
 		return "dan.me.uk-tor"
 	} else if strings.Contains(apiURL, "jhassine") {
-		return "jhassine-datacenters"
+		return "data-center-list"
 	} else if strings.Contains(apiURL, "projecthoneypot.org") {
 		return "projecthoneypot"
 	} else if strings.Contains(apiURL, "torbulkexitlist") {

@@ -86,6 +86,7 @@ func updateIPListsPeriodically(config Config) {
 // updateIPLists fetches and updates IP lists from various sources
 func updateIPLists(config Config) {
 	fmt.Println("Starting IP list update...")
+	metricsReset()
 
 	ipAssociationChan := make(chan IPAssociation, 1000)
 	var wg sync.WaitGroup
@@ -127,6 +128,7 @@ func fetchIPList(apiURL string, config Config, ipAssociationChan chan<- IPAssoci
 	}
 
 	for attempt := 0; attempt < config.Retries; attempt++ {
+		metricsAddFetchAttempt()
 		req, err := http.NewRequest("GET", apiURL, nil)
 		if err != nil {
 			fmt.Printf("Error creating request for %s: %v\n", apiURL, err)
@@ -152,14 +154,16 @@ func fetchIPList(apiURL string, config Config, ipAssociationChan chan<- IPAssoci
 			continue
 		}
 
-		// Parse the response based on content type or URL
+		// 成功路径
 		parseResponse(resp, apiURL, sourceID, ipAssociationChan)
 		err = resp.Body.Close()
 		if err != nil {
 			return
 		}
+		metricsAddFetchSuccess()
 		return // Success, exit retry loop
 	}
+	metricsAddFetchFailure() // 所有重试失败才计一次失败
 	fmt.Printf("Failed to fetch from %s after %d attempts\n", apiURL, config.Retries)
 }
 
@@ -193,12 +197,15 @@ func parseRSSResponse(resp *http.Response, sourceID string, ipAssociationChan ch
 			if line == "" {
 				continue
 			}
+			metricsAddLine()
 			if _, _, err := net.ParseCIDR(line); err == nil {
 				ipAssociationChan <- IPAssociation{Entry: line, Reason: sourceID}
+				classifyAndCount(line)
 				continue
 			}
 			if net.ParseIP(line) != nil {
 				ipAssociationChan <- IPAssociation{Entry: line, Reason: sourceID}
+				classifyAndCount(line)
 			}
 		}
 	}
@@ -212,6 +219,7 @@ func parseTextResponse(resp *http.Response, sourceID string, ipAssociationChan c
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
 			continue
 		}
+		metricsAddLine()
 
 		// Extract IP from tor exit-addresses format
 		if strings.HasPrefix(line, "ExitAddress ") {
@@ -220,15 +228,14 @@ func parseTextResponse(resp *http.Response, sourceID string, ipAssociationChan c
 				line = fields[1]
 			}
 		}
-
-		// Try CIDR parse (IPv4 / IPv6)
 		if _, _, err := net.ParseCIDR(line); err == nil {
 			ipAssociationChan <- IPAssociation{Entry: line, Reason: sourceID}
+			classifyAndCount(line)
 			continue
 		}
-		// Try single IP parse
 		if net.ParseIP(line) != nil {
 			ipAssociationChan <- IPAssociation{Entry: line, Reason: sourceID}
+			classifyAndCount(line)
 		}
 	}
 }

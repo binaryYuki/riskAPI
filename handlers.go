@@ -2,13 +2,11 @@ package main
 
 import (
 	"bufio"
+	"github.com/gin-gonic/gin"
 	"net"
 	"net/http"
 	"os"
 	"strings"
-	"time"
-
-	"github.com/gin-gonic/gin"
 )
 
 var version = "dev"
@@ -161,16 +159,8 @@ func filterProxiesHandler(c *gin.Context) {
 
 // statusHandler handles status requests
 func statusHandler(c *gin.Context) {
-	riskyDataMutex.RLock()
-	count := len(riskySingleIPs) + len(riskyCIDRInfo)
-	riskyDataMutex.RUnlock()
-
 	c.IndentedJSON(http.StatusOK, Response{
 		Status: "ok",
-		Message: StatusCountMsg{
-			Timestamp: time.Now().Unix(),
-			Count:     count,
-		},
 	})
 }
 
@@ -251,4 +241,13 @@ func versionHandler(c *gin.Context) {
 // notFoundHandler handles 404 requests
 func notFoundHandler(c *gin.Context) {
 	handleError(c, http.StatusNotFound, "Not Found")
+}
+
+// metricsHandler 返回当前解析/抓取统计快照
+func metricsHandler(c *gin.Context) {
+	snapshot := getMetricsSnapshot()
+	c.IndentedJSON(http.StatusOK, Response{
+		Status:  "ok",
+		Message: snapshot,
+	})
 }
