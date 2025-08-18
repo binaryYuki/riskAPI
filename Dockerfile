@@ -28,7 +28,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     GOOS=$TARGETOS \
     GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
-        -o /bin/server ./...
+        -o /bin/server .
 
 ################################################################################
 # Final runtime stage
