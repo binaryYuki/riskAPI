@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -11,6 +13,10 @@ import (
 )
 
 func main() {
+	// Set GOMAXPROCS to use all available CPU cores
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	log.Printf("GOMAXPROCS set to %d", runtime.GOMAXPROCS(0))
+
 	// Initialize cache and data structures
 	appCache = cache.New(ipCacheExpiry, 10*time.Minute)
 	_ = make(map[string]bool)
@@ -59,9 +65,25 @@ func main() {
 	// Setup routes
 	setupRoutes(router)
 
-	// Start server
+	// Start server with optimized settings for high concurrency
 	log.Printf("Starting server on port 8080...")
-	if err := router.Run(":8080"); err != nil {
+	srv := &http.Server{
+		Addr:           ":8080",
+		Handler:        router,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   30 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1 MB
+	}
+
+	// Configure transport for better concurrency
+	http.DefaultTransport.(*http.Transport).MaxIdleConns = 1000
+	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 100
+	http.DefaultTransport.(*http.Transport).IdleConnTimeout = 90 * time.Second
+
+	log.Printf("Server configured for high concurrency with optimized timeouts and connection limits")
+
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }

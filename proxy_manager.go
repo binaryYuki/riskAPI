@@ -92,6 +92,7 @@ func startCDNListSync() {
 	go func() {
 		for {
 			syncCDNLists()
+			syncIDCLists()             // Synchronize IDC lists as well
 			time.Sleep(24 * time.Hour) // Sync once daily
 		}
 	}()
