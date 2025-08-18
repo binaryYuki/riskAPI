@@ -39,6 +39,7 @@ func ipInfoHandler(c *gin.Context) {
 	cacheKey := "info:" + ipStr
 	if v, found := appCache.Get(cacheKey); found {
 		if resp, ok := v.(InfoResponse); ok {
+			c.Header("X-Catyuki-Cache", "HIT")
 			c.IndentedJSON(http.StatusOK, resp)
 			return
 		}

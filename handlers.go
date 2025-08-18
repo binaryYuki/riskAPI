@@ -251,3 +251,110 @@ func metricsHandler(c *gin.Context) {
 		Message: snapshot,
 	})
 }
+
+// flushCacheHandler 按路径参数清空或部分清理缓存
+// 路径格式: /api/cache/flush/:method/:range
+// :method 可为 all | info | risk
+// all: 忽略 :range, 清空所有缓存 (info 缓存 + 风险列表 + CDN/IDC 缓存)
+// info: :range=all 清空所有 info: 缓存; 否则认为是具体 IP, 删除对应 info:<ip>
+// risk: :range=all 清空风险 IP/CIDR 列表; 否则按 IP 或 CIDR 删除单条
+func flushCacheHandler(c *gin.Context) {
+	method := c.Param("method")
+	rng := c.Param("range")
+	result := gin.H{"method": method, "range": rng}
+
+	switch method {
+	case "all":
+		// 清空 info 缓存
+		if appCache != nil {
+			appCache.Flush()
+		}
+		// 清空风险数据
+		riskyDataMutex.Lock()
+		riskyCIDRInfo = nil
+		reasonMap = make(map[string]string)
+		riskyDataMutex.Unlock()
+		// 清空 CDN/IDC 缓存
+		cdnIdcMutex.Lock()
+		cdnIPCache = make(map[string][]CIDRInfo)
+		idcIPCache = make(map[string][]CIDRInfo)
+		cdnSingleIPs = make(map[string]map[string]bool)
+		idcSingleIPs = make(map[string]map[string]bool)
+		cdnIdcMutex.Unlock()
+		result["flushed_info_cache"] = true
+		result["flushed_risk"] = true
+		result["flushed_cdn_idc"] = true
+
+	case "info":
+		if appCache == nil {
+			break
+		}
+		if rng == "all" {
+			// 仅清除 info: 前缀键
+			for k := range appCache.Items() {
+				if strings.HasPrefix(k, "info:") {
+					appCache.Delete(k)
+				}
+			}
+			result["flushed_info_all"] = true
+		} else {
+			key := "info:" + rng
+			appCache.Delete(key)
+			result["flushed_info_key"] = rng
+		}
+
+	case "risk":
+		if rng == "all" {
+			riskyDataMutex.Lock()
+			riskyCIDRInfo = nil
+			reasonMap = make(map[string]string)
+			riskyDataMutex.Unlock()
+			result["flushed_risk_all"] = true
+		} else {
+			removed := removeRiskEntry(rng)
+			result["removed_entry"] = rng
+			result["removed"] = removed
+		}
+	default:
+		handleError(c, http.StatusBadRequest, "unsupported method")
+		return
+	}
+
+	c.IndentedJSON(http.StatusOK, Response{Status: "ok", Message: result})
+}
+
+// flushCacheIndexHandler 返回可用缓存刷新端点说明(隐藏 method=all)
+func flushCacheIndexHandler(c *gin.Context) {
+	c.IndentedJSON(http.StatusOK, Response{Status: "ok", Message: gin.H{
+		"description": "使用 POST /api/cache/flush/:method/:range 刷新缓存, :method 仅支持 info | risk",
+		"endpoints": []string{
+			"POST /api/cache/flush/info/<ip> # Delete the cache for a specific IP for info lookups (e.g. /api/cache/flush/info/1.1.1.1)",
+			"POST /api/cache/flush/risk/<ip_or_cidr> # Delete a specific risky IP or CIDR (e.g. /api/cache/flush/risk/1.1.1.1)",
+		},
+	}})
+}
+
+// removeRiskEntry 删除单个风险 IP 或 CIDR, 返回是否删除成功
+func removeRiskEntry(entry string) bool {
+	removed := false
+	riskyDataMutex.Lock()
+	defer riskyDataMutex.Unlock()
+
+	if _, ok := reasonMap[entry]; ok {
+		delete(reasonMap, entry)
+		removed = true
+	}
+
+	if strings.Contains(entry, "/") {
+		var newList []CIDRInfo
+		for _, ci := range riskyCIDRInfo {
+			if ci.OriginalCIDR == entry {
+				removed = true
+				continue
+			}
+			newList = append(newList, ci)
+		}
+		riskyCIDRInfo = newList
+	}
+	return removed
+}
