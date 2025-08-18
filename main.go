@@ -99,7 +99,6 @@ func setupRoutes(router *gin.Engine) {
 
 	router.GET("/api/metrics", metricsHandler)
 
-	// 缓存刷新接口 index & 动作
 	router.GET("/api/cache/flush", flushCacheIndexHandler)
-	router.POST("/api/cache/flush/:method/:range", flushCacheHandler)
+	router.POST("/api/cache/flush/:method/*range", flushCacheHandler)
 }
