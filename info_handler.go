@@ -87,8 +87,8 @@ func ipInfoHandler(c *gin.Context) {
 		}
 	}
 
-	// 新增: Meituan 在线 API 查询 (非 MMDB)
-	if meituan.Suitable(ipStr) { // 仅在 IP 合适时尝试
+	// 仅当其它 provider 判定为中国(CN) 且 IP 适合时再调用美团 API
+	if isChina(results) && meituan.Suitable(ipStr) {
 		if mtData, err := meituan.Query(ctx, ipStr, nil, meituan.QueryOptions{Enhanced: true}); err == nil && len(mtData) > 0 {
 			results["meituan"] = mtData
 		}
@@ -98,6 +98,31 @@ RESPONSE:
 	resp := InfoResponse{Status: "ok", IP: ipStr, Results: results}
 	appCache.Set(cacheKey, resp, infoCacheExpiry)
 	c.IndentedJSON(http.StatusOK, resp)
+}
+
+// isChina 判断结果中是否有任何 provider 显示为中国
+func isChina(results map[string]interface{}) bool {
+	// ipinfo: country == "CN"
+	if v, ok := results["ipinfo"].(map[string]interface{}); ok {
+		if c, ok2 := v["country"].(string); ok2 && c == "CN" {
+			return true
+		}
+	}
+	// maxmind: country.iso_code == "CN"
+	if v, ok := results["maxmind"].(map[string]interface{}); ok {
+		if country, ok2 := v["country"].(map[string]interface{}); ok2 {
+			if iso, ok3 := country["iso_code"].(string); ok3 && iso == "CN" {
+				return true
+			}
+		}
+	}
+	// iplocate: country_code == "CN"
+	if v, ok := results["iplocate"].(map[string]interface{}); ok {
+		if c, ok2 := v["country_code"].(string); ok2 && c == "CN" {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupGeneric 以通用结构解析 MMDB (不定义固定 struct) 返回 map / slice / 基本类型构成的结构
