@@ -48,6 +48,7 @@ USER appuser
 # Copy binary and data
 COPY --from=builder /bin/server /bin/server
 COPY --from=builder /src/data /data
+COPY --from=builder /src/providers /providers
 
 # Remove any stray .git directories (safety net)
 RUN rm -rf /data/.git /src/.git || true
