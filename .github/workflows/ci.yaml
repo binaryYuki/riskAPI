@@ -58,3 +58,29 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/risk-api:${{ github.run_id }}
             ${{ secrets.DOCKER_USERNAME }}/risk-api:latest
 
+      - name: Wait for registry propagation
+        run: sleep 3
+
+      # Service Redeploy
+      - name: Redeploy Koyeb service
+        env:
+          KOYEB_API_TOKEN: ${{ secrets.KOYEB_API_TOKEN }}   # 在 Repo Secrets 里设置
+          KOYEB_SERVICE_ID: ${{ secrets.KOYEB_SERVICE_ID }} # 在 Koyeb 控台或 API 获取
+        run: |
+          set -euo pipefail
+          echo "Triggering redeploy for service ${KOYEB_SERVICE_ID: -4}..."
+          HTTP_CODE=$(curl -sS -X POST \
+            -H "Authorization: Bearer ${KOYEB_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            -o /tmp/koyeb_resp.json \
+            -w "%{http_code}" \
+            "https://app.koyeb.com/v1/services/${KOYEB_SERVICE_ID}/redeploy")
+          echo "Koyeb API HTTP ${HTTP_CODE}"
+          if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+            echo "Redeploy failed. Response body:"
+            cat /tmp/koyeb_resp.json
+            exit 1
+          fi
+          echo "Redeploy triggered successfully."
+
