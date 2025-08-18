@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"log"
 	"net"
 	"net/http"
 	"os"
 
+	"risky_ip_filter/providers/ipsb"
 	"risky_ip_filter/providers/meituan"
 
 	"github.com/gin-gonic/gin"
@@ -63,6 +65,7 @@ func ipInfoHandler(c *gin.Context) {
 		select {
 		case <-ctx.Done():
 			// 超时则停止后续 provider
+			log.Printf("[info] provider_loop_timeout ip=%s provider=%s correlation_id=%v", ipStr, p.name, getCorrelationID(c))
 			goto RESPONSE
 		default:
 		}
@@ -74,11 +77,14 @@ func ipInfoHandler(c *gin.Context) {
 			}
 			select { // 每个 DB 单独检查超时
 			case <-ctx.Done():
+				log.Printf("[info] provider_db_timeout ip=%s provider=%s db=%s correlation_id=%v", ipStr, p.name, dbPath, getCorrelationID(c))
 				goto RESPONSE
 			default:
 			}
 			if data, err := lookupGeneric(dbPath, ip); err == nil {
 				mergeGeneric(providerData, data)
+			} else {
+				log.Printf("[error] provider_mmdb_lookup_fail ip=%s provider=%s db=%s err=%v correlation_id=%v", ipStr, p.name, dbPath, err, getCorrelationID(c))
 			}
 		}
 		if len(providerData) > 0 {
@@ -87,10 +93,22 @@ func ipInfoHandler(c *gin.Context) {
 		}
 	}
 
-	// 仅当其它 provider 判定为中国(CN) 且 IP 适合时再调用美团 API
-	if isChina(results) && meituan.Suitable(ipStr) {
-		if mtData, err := meituan.Query(ctx, ipStr, nil, meituan.QueryOptions{Enhanced: true}); err == nil && len(mtData) > 0 {
-			results["meituan"] = mtData
+	// 仅当其它 provider 判定为中国(CN) 且 IP 适合时再调用美团 API；否则(非中国)调用 ip.sb
+	if isChina(results) {
+		if meituan.Suitable(ipStr) {
+			if mtData, err := meituan.Query(ctx, ipStr, nil, meituan.QueryOptions{Enhanced: true}); err == nil && len(mtData) > 0 {
+				results["meituan"] = mtData
+			} else if err != nil {
+				log.Printf("[error] provider_meituan_fail ip=%s err=%v correlation_id=%v", ipStr, err, getCorrelationID(c))
+			}
+		} else {
+			log.Printf("[info] provider_meituan_skip ip=%s reason=unsuitable_ipv4 correlation_id=%v", ipStr, getCorrelationID(c))
+		}
+	} else {
+		if ipsbData, err := ipsb.Query(ctx, ipStr, nil); err == nil && len(ipsbData) > 0 {
+			results["ipsb"] = ipsbData
+		} else if err != nil {
+			log.Printf("[error] provider_ipsb_fail ip=%s err=%v correlation_id=%v", ipStr, err, getCorrelationID(c))
 		}
 	}
 
@@ -201,4 +219,9 @@ func statOk(path string) bool {
 		return false
 	}
 	return true
+}
+
+func getCorrelationID(c *gin.Context) interface{} {
+	cid, _ := c.Get("correlation_id")
+	return cid
 }
