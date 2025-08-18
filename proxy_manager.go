@@ -106,6 +106,15 @@ func syncCDNLists() {
 	fmt.Println("CDN lists synchronized")
 }
 
+// syncIDCLists synchronizes IDC lists from data files to cache
+func syncIDCLists() {
+	idcProviders := []string{"aws", "azure", "gcp", "akamai", "apple", "digitalocean", "linode", "oracle", "zscaler"}
+	for _, provider := range idcProviders {
+		loadIDCIPList(provider)
+	}
+	fmt.Println("IDC lists synchronized")
+}
+
 // processProxies filters out risky proxies from the list
 func processProxies(proxies []Proxy, concurrency int) []Proxy {
 	var nonRiskyProxies []Proxy

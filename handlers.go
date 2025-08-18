@@ -5,6 +5,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -261,7 +262,10 @@ func metricsHandler(c *gin.Context) {
 func flushCacheHandler(c *gin.Context) {
 	method := c.Param("method")
 	rng := c.Param("range")
-	result := gin.H{"method": method, "range": rng}
+	if rng != "" && strings.HasPrefix(rng, "/") { // 通配符路径去掉前导斜杠
+		rng = rng[1:]
+	}
+	result := gin.H{"method": method, "range": rng} // 移到前导斜杠处理之后
 
 	switch method {
 	case "all":
@@ -281,6 +285,11 @@ func flushCacheHandler(c *gin.Context) {
 		cdnSingleIPs = make(map[string]map[string]bool)
 		idcSingleIPs = make(map[string]map[string]bool)
 		cdnIdcMutex.Unlock()
+
+		// 立即重新加载 CDN & IDC 列表，避免等待下一次定时同步
+		syncCDNLists()
+		syncIDCLists()
+
 		result["flushed_info_cache"] = true
 		result["flushed_risk"] = true
 		result["flushed_cdn_idc"] = true
@@ -298,6 +307,9 @@ func flushCacheHandler(c *gin.Context) {
 			}
 			result["flushed_info_all"] = true
 		} else {
+			if decoded, err := url.PathUnescape(rng); err == nil {
+				rng = decoded
+			}
 			key := "info:" + rng
 			appCache.Delete(key)
 			result["flushed_info_key"] = rng
@@ -311,6 +323,9 @@ func flushCacheHandler(c *gin.Context) {
 			riskyDataMutex.Unlock()
 			result["flushed_risk_all"] = true
 		} else {
+			if decoded, err := url.PathUnescape(rng); err == nil {
+				rng = decoded
+			}
 			removed := removeRiskEntry(rng)
 			result["removed_entry"] = rng
 			result["removed"] = removed
