@@ -1,0 +1,210 @@
+name: Update MMDB Databases
+
+on:
+  schedule:
+    # 每天 03:20 UTC 运行（可按需调整）
+    - cron: "20 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-mmdb
+  cancel-in-progress: false
+
+jobs:
+  update-mmdb:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 允许 rebase
+          persist-credentials: true
+
+      - name: Prepare directories
+        run: |
+          set -euxo pipefail
+          mkdir -p providers/maxmind providers/ipinfo providers/iplocate tmp_mmdb
+
+      # ---------------- MaxMind via geoipupdate ----------------
+      - name: Install geoipupdate
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y geoipupdate
+
+      - name: Update MaxMind (GeoLite2) with geoipupdate
+        env:
+          MAXMIND_ACCOUNT_ID: ${{ secrets.MAXMIND_ACCOUNT_ID }}
+          MAXMIND_LICENSE_KEY: ${{ secrets.MAXMIND_LICENSE_KEY }}
+          # 可选：自定义需要的库（默认 ASN+Country；若需 City 则加上 GeoLite2-City）
+          MAXMIND_EDITION_IDS: ${{ vars.MAXMIND_EDITION_IDS }}
+        run: |
+          set -euxo pipefail
+          if [ -z "${MAXMIND_ACCOUNT_ID:-}" ] || [ -z "${MAXMIND_LICENSE_KEY:-}" ]; then
+            echo "MaxMind secrets missing, skipping MaxMind."
+            exit 0
+          fi
+
+          EDITIONS="${MAXMIND_EDITION_IDS:-GeoLite2-ASN GeoLite2-Country}"
+          CONF="${RUNNER_TEMP}/GeoIP.conf"
+          {
+            echo "AccountID ${MAXMIND_ACCOUNT_ID}"
+            echo "LicenseKey ${MAXMIND_LICENSE_KEY}"
+            echo "EditionIDs ${EDITIONS}"
+          } > "$CONF"
+
+          geoipupdate -v -f "$CONF" -d "providers/maxmind"
+
+      # ---------------- IPinfo ----------------
+      - name: Download IPinfo (ASN & Country)
+        env:
+          IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
+        run: |
+          set -euxo pipefail
+          if [ -n "${IPINFO_TOKEN:-}" ]; then
+            set +e
+            curl -fSL "https://ipinfo.io/data/free/country.mmdb?token=${IPINFO_TOKEN}" -o tmp_mmdb/IPinfo-Country.mmdb || \
+            curl -fSL "https://ipinfo.io/data/country.mmdb?token=${IPINFO_TOKEN}" -o tmp_mmdb/IPinfo-Country.mmdb
+            RES1=$?
+          
+            curl -fSL "https://ipinfo.io/data/free/asn.mmdb?token=${IPINFO_TOKEN}" -o tmp_mmdb/IPinfo-ASN.mmdb || \
+            curl -fSL "https://ipinfo.io/data/asn.mmdb?token=${IPINFO_TOKEN}" -o tmp_mmdb/IPinfo-ASN.mmdb
+            RES2=$?
+            set -e
+          
+            if [ $RES1 -eq 0 ]; then cp -f tmp_mmdb/IPinfo-Country.mmdb providers/ipinfo/ipinfo-country.mmdb; fi
+            if [ $RES2 -eq 0 ]; then cp -f tmp_mmdb/IPinfo-ASN.mmdb     providers/ipinfo/ipinfo-asn.mmdb; fi
+          else
+            echo "IPINFO_TOKEN not set, skipping IPinfo."
+          fi
+
+      # ---------------- IPLocate (account link preferred, public mirrors fallback) ----------------
+      - name: Download IPLocate databases (Country & ASN)
+        env:
+          IPLOCATE_DOWNLOAD_URL: ${{ secrets.IPLOCATE_DOWNLOAD_URL }}
+        run: |
+          set -euxo pipefail
+          # 1) 优先使用账号下载页直链（可能直接是 .mmdb 或压缩包）
+          if [ -n "${IPLOCATE_DOWNLOAD_URL:-}" ]; then
+            if curl -fSL "$IPLOCATE_DOWNLOAD_URL" -o tmp_mmdb/iplocate.bin; then
+              file tmp_mmdb/iplocate.bin || true
+              # 直接是 mmdb 的情况
+              if file tmp_mmdb/iplocate.bin | grep -qi "MaxMind DB"; then
+                cp -f tmp_mmdb/iplocate.bin providers/iplocate/iplocate-country.mmdb
+              else
+                # 尝试解包
+                ( tar -xf tmp_mmdb/iplocate.bin -C tmp_mmdb 2>/dev/null || true )
+                ( unzip -o tmp_mmdb/iplocate.bin -d tmp_mmdb 2>/dev/null || true )
+                # 匹配并分类
+                FOUND_COUNTRY="$(find tmp_mmdb -type f -iname '*country*.mmdb' | head -n1 || true)"
+                FOUND_ASN="$(find tmp_mmdb -type f -iname '*asn*.mmdb' | head -n1 || true)"
+                FIRST_MMDB="$(find tmp_mmdb -type f -name '*.mmdb' | head -n1 || true)"
+                if [ -n "$FOUND_COUNTRY" ]; then cp -f "$FOUND_COUNTRY" providers/iplocate/iplocate-country.mmdb; fi
+                if [ -n "$FOUND_ASN" ]; then cp -f "$FOUND_ASN" providers/iplocate/iplocate-asn.mmdb; fi
+                if [ -z "$FOUND_COUNTRY" ] && [ -n "$FIRST_MMDB" ]; then cp -f "$FIRST_MMDB" providers/iplocate/iplocate-country.mmdb; fi
+              fi
+            fi
+          fi
+          
+          # 2) 公共镜像回退（Country）
+          if [ ! -f providers/iplocate/iplocate-country.mmdb ]; then
+            set +e
+            curl -fSL "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-country-mmdb/iplocate-country-ipv4-ipv6.mmdb" -o tmp_mmdb/iplocate-country.mmdb || \
+            curl -fSL "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-country-mmdb/iplocate-country-ipv4.mmdb" -o tmp_mmdb/iplocate-country.mmdb || \
+            curl -fSL "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-country/iplocate-country-ipv4-ipv6.mmdb" -o tmp_mmdb/iplocate-country.mmdb || \
+            curl -fSL "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-country/iplocate-country-ipv4.mmdb" -o tmp_mmdb/iplocate-country.mmdb
+            RES_C=$?
+            set -e
+            if [ $RES_C -eq 0 ]; then
+              cp -f tmp_mmdb/iplocate-country.mmdb providers/iplocate/iplocate-country.mmdb
+            else
+              echo "IPLocate country MMDB not available via public mirrors."
+            fi
+          fi
+          
+          # 2) 公共镜像回退（ASN）
+          if [ ! -f providers/iplocate/iplocate-asn.mmdb ]; then
+            set +e
+            curl -fSL "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-asn-mmdb/iplocate-asn-ipv4-ipv6.mmdb" -o tmp_mmdb/iplocate-asn.mmdb || \
+            curl -fSL "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-asn-mmdb/iplocate-asn-ipv4.mmdb" -o tmp_mmdb/iplocate-asn.mmdb || \
+            curl -fSL "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-asn/iplocate-asn-ipv4-ipv6.mmdb" -o tmp_mmdb/iplocate-asn.mmdb || \
+            curl -fSL "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-asn/iplocate-asn-ipv4.mmdb" -o tmp_mmdb/iplocate-asn.mmdb
+            RES_A=$?
+            set -e
+            if [ $RES_A -eq 0 ]; then
+              cp -f tmp_mmdb/iplocate-asn.mmdb providers/iplocate/iplocate-asn.mmdb
+            else
+              echo "IPLocate ASN MMDB not available via public mirrors."
+            fi
+          fi
+
+      # ---------------- Normalize / Validate (optional light checks) ----------------
+      - name: List resulting files
+        run: |
+          set -euxo pipefail
+          find providers -maxdepth 2 -type f -name "*.mmdb" -print || true
+
+      # ---------------- Commit & Push (providers path only) ----------------
+      - name: Git configure & pre-sync
+        run: |
+          set -euxo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          CURRENT_BRANCH="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
+          git fetch origin "$CURRENT_BRANCH"
+          git pull --rebase -X ours --autostash origin "$CURRENT_BRANCH" || {
+            echo "Initial rebase failed, attempting to abort and continue..."
+            git rebase --abort || true
+          }
+
+      - name: Check changes under /providers only
+        id: diff
+        run: |
+          set -euxo pipefail
+          git add -A -- providers
+          OUTSIDE_CHANGES="$(git status --porcelain | grep -vE '^(A|M|R|D|\?\?) providers/' || true)"
+          if [ -n "${OUTSIDE_CHANGES}" ]; then
+            echo "Detected changes outside /providers; resetting them."
+            git restore --staged :/
+            git checkout -- .
+            git add -A -- providers
+          fi
+          if git diff --cached --quiet -- providers; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit & Push (with retry & conflict handling)
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          set -euxo pipefail
+          TIME_UTC="$(date -u +'%Y-%m-%d %H-%M-%S')"
+          git commit -m "sync mmdb file at ${TIME_UTC}" -- providers || true
+          
+          CURRENT_BRANCH="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
+          n=0
+          until [ $n -ge 3 ]
+          do
+            if git push origin "$CURRENT_BRANCH"; then
+              echo "Push succeeded."
+              break
+            else
+              echo "Push failed, attempting rebase-and-retry... ($((n+1))/3)"
+              git pull --rebase -X ours --autostash origin "$CURRENT_BRANCH" || {
+                echo "Rebase failed, aborting and re-applying staged changes..."
+                git rebase --abort || true
+                git restore --staged :/
+                git add -A -- providers
+                git diff --cached --quiet -- providers && exit 0
+                TIME_UTC="$(date -u +'%Y-%m-%d %H-%M-%S')"
+                git commit --amend -m "sync mmdb file at ${TIME_UTC}" --allow-empty --no-edit || git commit -m "sync mmdb file at ${TIME_UTC}" -- providers || true
+              }
+            fi
+            n=$((n+1))
+          done
