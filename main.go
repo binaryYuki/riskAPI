@@ -13,7 +13,7 @@ import (
 func main() {
 	// Initialize cache and data structures
 	appCache = cache.New(ipCacheExpiry, 10*time.Minute)
-	riskySingleIPs = make(map[string]bool)
+	_ = make(map[string]bool)
 	riskyCIDRInfo = make([]CIDRInfo, 0)
 	reasonMap = make(map[string]string)
 
@@ -72,9 +72,6 @@ func setupRoutes(router *gin.Engine) {
 	router.NoRoute(notFoundHandler)
 	router.GET("/", homeHandler)
 
-	// Version route
-	router.GET("/version", versionHandler)
-
 	// API routes
 	ipCheckGroup := router.Group("/api/v1/ip")
 	{
@@ -83,6 +80,15 @@ func setupRoutes(router *gin.Engine) {
 	}
 	router.GET("/api/v1/ip", checkRequestIPHandler)
 	router.GET("/api/status", statusHandler)
+
+	router.GET("/api/v1/info", ipInfoHandler)
+	infoGroup := router.Group("/api/v1/info")
+	{
+		infoGroup.GET("/:ip", ipInfoHandler)
+	}
+
+	// Version route
+	router.GET("/version", versionHandler)
 
 	// Proxy filtering
 	router.POST("/filter-proxies", filterProxiesHandler)

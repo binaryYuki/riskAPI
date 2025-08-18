@@ -8,6 +8,7 @@ require (
 	github.com/gin-contrib/cors v1.7.6
 	github.com/gin-gonic/gin v1.10.1
 	github.com/google/uuid v1.6.0
+	github.com/oschwald/maxminddb-golang v1.13.1 // 新增: 解析通用 MMDB (ipinfo/iplocate/maxmind)
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/stretchr/testify v1.10.0
 )

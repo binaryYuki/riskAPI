@@ -1,12 +1,8 @@
 name: Update MMDB Databases
 
 on:
-  push:
-    branches:
-      - test
   schedule:
-    # 每天 03:20 UTC 运行（可按需调整）
-    - cron: "20 3 * * *"
+    - cron: "0 3 * * *"
   workflow_dispatch:
 
 permissions:
