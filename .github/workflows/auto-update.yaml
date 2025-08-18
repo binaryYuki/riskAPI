@@ -85,65 +85,94 @@ jobs:
             echo "IPINFO_TOKEN not set, skipping IPinfo."
           fi
 
-      # ---------------- IPLocate (account link preferred, public mirrors fallback) ----------------
       - name: Download IPLocate databases (Country & ASN)
         env:
           IPLOCATE_DOWNLOAD_URL: ${{ secrets.IPLOCATE_DOWNLOAD_URL }}
+          IPLOCATE_SHA256: ${{ secrets.IPLOCATE_SHA256 }} # 可选：对账号直链的文件做校验
         run: |
           set -euxo pipefail
-          # 1) 优先使用账号下载页直链（可能直接是 .mmdb 或压缩包）
+          mkdir -p tmp_mmdb providers/iplocate
+
+          sanitize_url() {
+            # 去掉回车、前后空白
+            printf "%s" "$1" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+          }
+
+          # -------- 1) 账号直链优先 --------
           if [ -n "${IPLOCATE_DOWNLOAD_URL:-}" ]; then
-            if curl -fSL "$IPLOCATE_DOWNLOAD_URL" -o tmp_mmdb/iplocate.bin; then
-              file tmp_mmdb/iplocate.bin || true
-              # 直接是 mmdb 的情况
-              if file tmp_mmdb/iplocate.bin | grep -qi "MaxMind DB"; then
-                cp -f tmp_mmdb/iplocate.bin providers/iplocate/iplocate-country.mmdb
-              else
-                # 尝试解包
-                ( tar -xf tmp_mmdb/iplocate.bin -C tmp_mmdb 2>/dev/null || true )
-                ( unzip -o tmp_mmdb/iplocate.bin -d tmp_mmdb 2>/dev/null || true )
-                # 匹配并分类
-                FOUND_COUNTRY="$(find tmp_mmdb -type f -iname '*country*.mmdb' | head -n1 || true)"
-                FOUND_ASN="$(find tmp_mmdb -type f -iname '*asn*.mmdb' | head -n1 || true)"
-                FIRST_MMDB="$(find tmp_mmdb -type f -name '*.mmdb' | head -n1 || true)"
-                if [ -n "$FOUND_COUNTRY" ]; then cp -f "$FOUND_COUNTRY" providers/iplocate/iplocate-country.mmdb; fi
-                if [ -n "$FOUND_ASN" ]; then cp -f "$FOUND_ASN" providers/iplocate/iplocate-asn.mmdb; fi
-                if [ -z "$FOUND_COUNTRY" ] && [ -n "$FIRST_MMDB" ]; then cp -f "$FIRST_MMDB" providers/iplocate/iplocate-country.mmdb; fi
-              fi
+            CLEAN_URL="$(sanitize_url "${IPLOCATE_DOWNLOAD_URL}")"
+
+            # 快速 HEAD 验证（不失败整个 Job）
+            curl -I -L --retry 3 --retry-all-errors --max-time 60 "$CLEAN_URL" || true
+
+            # 拉取主体
+            curl -fSL --retry 3 --retry-all-errors --max-time 600 "$CLEAN_URL" -o tmp_mmdb/iplocate.bin
+
+            # 可选：SHA256 校验
+            if [ -n "${IPLOCATE_SHA256:-}" ]; then
+              echo "${IPLOCATE_SHA256}  tmp_mmdb/iplocate.bin" | sha256sum -c -
+            fi
+
+            # 判断是否是 MMDB
+            if file tmp_mmdb/iplocate.bin | grep -qi "MaxMind DB"; then
+              cp -f tmp_mmdb/iplocate.bin providers/iplocate/iplocate-country.mmdb
+            else
+              # 可能是 zip/tar.gz
+              ( tar -xf tmp_mmdb/iplocate.bin -C tmp_mmdb 2>/dev/null || true )
+              ( unzip -o tmp_mmdb/iplocate.bin -d tmp_mmdb 2>/dev/null || true )
+              FOUND_COUNTRY="$(find tmp_mmdb -type f -iname '*country*.mmdb' | head -n1 || true)"
+              FOUND_ASN="$(find tmp_mmdb -type f -iname '*asn*.mmdb' | head -n1 || true)"
+              FIRST_MMDB="$(find tmp_mmdb -type f -name '*.mmdb' | head -n1 || true)"
+              if [ -n "$FOUND_COUNTRY" ]; then cp -f "$FOUND_COUNTRY" providers/iplocate/iplocate-country.mmdb; fi
+              if [ -n "$FOUND_ASN" ]; then cp -f "$FOUND_ASN" providers/iplocate/iplocate-asn.mmdb; fi
+              if [ -z "$FOUND_COUNTRY" ] && [ -n "$FIRST_MMDB" ]; then cp -f "$FIRST_MMDB" providers/iplocate/iplocate-country.mmdb; fi
             fi
           fi
-          
-          # 2) 公共镜像回退（Country）
+
+          # -------- 2) 公共镜像回退：Country（先 ipv4，再 ipv4+ipv6）--------
           if [ ! -f providers/iplocate/iplocate-country.mmdb ]; then
             set +e
-            curl -fSL "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-country-mmdb/iplocate-country-ipv4-ipv6.mmdb" -o tmp_mmdb/iplocate-country.mmdb || \
-            curl -fSL "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-country-mmdb/iplocate-country-ipv4.mmdb" -o tmp_mmdb/iplocate-country.mmdb || \
-            curl -fSL "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-country/iplocate-country-ipv4-ipv6.mmdb" -o tmp_mmdb/iplocate-country.mmdb || \
-            curl -fSL "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-country/iplocate-country-ipv4.mmdb" -o tmp_mmdb/iplocate-country.mmdb
+            curl -fSL --retry 3 --retry-all-errors \
+              "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-country-mmdb/iplocate-country-ipv4.mmdb" \
+              -o tmp_mmdb/iplocate-country.mmdb || \
+            curl -fSL --retry 3 --retry-all-errors \
+              "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-country-mmdb/iplocate-country-ipv4-ipv6.mmdb" \
+              -o tmp_mmdb/iplocate-country.mmdb || \
+            curl -fSL --retry 3 --retry-all-errors \
+              "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-country/iplocate-country-ipv4.mmdb" \
+              -o tmp_mmdb/iplocate-country.mmdb || \
+            curl -fSL --retry 3 --retry-all-errors \
+              "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-country/iplocate-country-ipv4-ipv6.mmdb" \
+              -o tmp_mmdb/iplocate-country.mmdb
             RES_C=$?
             set -e
             if [ $RES_C -eq 0 ]; then
               cp -f tmp_mmdb/iplocate-country.mmdb providers/iplocate/iplocate-country.mmdb
-            else
-              echo "IPLocate country MMDB not available via public mirrors."
             fi
           fi
-          
-          # 2) 公共镜像回退（ASN）
+
+          # -------- 3) 公共镜像回退：ASN（先 ipv4，再 ipv4+ipv6）--------
           if [ ! -f providers/iplocate/iplocate-asn.mmdb ]; then
             set +e
-            curl -fSL "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-asn-mmdb/iplocate-asn-ipv4-ipv6.mmdb" -o tmp_mmdb/iplocate-asn.mmdb || \
-            curl -fSL "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-asn-mmdb/iplocate-asn-ipv4.mmdb" -o tmp_mmdb/iplocate-asn.mmdb || \
-            curl -fSL "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-asn/iplocate-asn-ipv4-ipv6.mmdb" -o tmp_mmdb/iplocate-asn.mmdb || \
-            curl -fSL "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-asn/iplocate-asn-ipv4.mmdb" -o tmp_mmdb/iplocate-asn.mmdb
+            curl -fSL --retry 3 --retry-all-errors \
+              "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-asn-mmdb/iplocate-asn-ipv4.mmdb" \
+              -o tmp_mmdb/iplocate-asn.mmdb || \
+            curl -fSL --retry 3 --retry-all-errors \
+              "https://cdn.jsdelivr.net/npm/@ip-location-db/iplocate-asn-mmdb/iplocate-asn-ipv4-ipv6.mmdb" \
+              -o tmp_mmdb/iplocate-asn.mmdb || \
+            curl -fSL --retry 3 --retry-all-errors \
+              "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-asn/iplocate-asn-ipv4.mmdb" \
+              -o tmp_mmdb/iplocate-asn.mmdb || \
+            curl -fSL --retry 3 --retry-all-errors \
+              "https://raw.githubusercontent.com/iplocate/ip-address-databases/main/ip-to-asn/iplocate-asn-ipv4-ipv6.mmdb" \
+              -o tmp_mmdb/iplocate-asn.mmdb
             RES_A=$?
             set -e
             if [ $RES_A -eq 0 ]; then
               cp -f tmp_mmdb/iplocate-asn.mmdb providers/iplocate/iplocate-asn.mmdb
-            else
-              echo "IPLocate ASN MMDB not available via public mirrors."
             fi
           fi
+
 
       # ---------------- Normalize / Validate (optional light checks) ----------------
       - name: List resulting files
