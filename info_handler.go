@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 
+	"risky_ip_filter/providers/meituan"
+
 	"github.com/gin-gonic/gin"
 	"github.com/oschwald/maxminddb-golang"
 )
@@ -82,6 +84,13 @@ func ipInfoHandler(c *gin.Context) {
 		if len(providerData) > 0 {
 			removeIPKey(providerData)
 			results[p.name] = providerData
+		}
+	}
+
+	// 新增: Meituan 在线 API 查询 (非 MMDB)
+	if meituan.Suitable(ipStr) { // 仅在 IP 合适时尝试
+		if mtData, err := meituan.Query(ctx, ipStr, nil, meituan.QueryOptions{Enhanced: true}); err == nil && len(mtData) > 0 {
+			results["meituan"] = mtData
 		}
 	}
 
