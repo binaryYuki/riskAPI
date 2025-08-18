@@ -8,9 +8,11 @@ import (
 )
 
 const (
-	ipCacheKey      = "risky_ip_list_entries" // Cache key for raw IP/CIDR strings
-	ipCacheExpiry   = 6 * time.Hour
-	updateFrequency = 1 * time.Hour
+	ipCacheKey        = "risky_ip_list_entries" // Cache key for raw IP/CIDR strings
+	ipCacheExpiry     = 6 * time.Hour
+	updateFrequency   = 1 * time.Hour
+	infoCacheExpiry   = 1 * time.Hour           // /api/v1/info 缓存过期时间
+	infoLookupTimeout = 1500 * time.Millisecond // /api/v1/info 总体查询超时时间
 )
 
 // Local proxy networks

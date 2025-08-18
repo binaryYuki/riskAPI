@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
+	"github.com/patrickmn/go-cache"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -57,7 +59,7 @@ func TestCheckRequestIPHandler(t *testing.T) {
 			wantCode:   http.StatusOK,
 			wantBody:   `{"status":"banned","message":"Test reason","ip":"8.8.8.8"}`,
 			setup: func() {
-				riskySingleIPs = map[string]bool{"8.8.8.8": true}
+				_ = map[string]bool{"8.8.8.8": true}
 				reasonMap = map[string]string{"8.8.8.8": "Test reason"}
 			},
 		},
@@ -125,7 +127,7 @@ func TestRiskyIPChannels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	// edgeone
 	riskyCIDRInfo = []CIDRInfo{}
-	riskySingleIPs = map[string]bool{}
+	_ = map[string]bool{}
 	reasonMap = map[string]string{}
 	_, edgeoneNet, _ := net.ParseCIDR("1.71.146.0/23")
 	riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: edgeoneNet, OriginalCIDR: "1.71.146.0/23"})
@@ -141,7 +143,7 @@ func TestRiskyIPChannels(t *testing.T) {
 
 	// fastly
 	riskyCIDRInfo = []CIDRInfo{}
-	riskySingleIPs = map[string]bool{}
+	_ = map[string]bool{}
 	reasonMap = map[string]string{}
 	_, fastlyNet, _ := net.ParseCIDR("23.235.32.0/20")
 	riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: fastlyNet, OriginalCIDR: "23.235.32.0/20"})
@@ -218,7 +220,7 @@ func TestAllRiskyChannelsAuto(t *testing.T) {
 		channel := strings.TrimSuffix(parts[len(parts)-1], ".txt")
 		t.Run(channel, func(t *testing.T) {
 			riskyCIDRInfo = []CIDRInfo{}
-			riskySingleIPs = map[string]bool{}
+			_ = map[string]bool{}
 			reasonMap = map[string]string{}
 			_, netObj, _ := net.ParseCIDR(cidr)
 			riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: netObj, OriginalCIDR: cidr})
@@ -232,4 +234,52 @@ func TestAllRiskyChannelsAuto(t *testing.T) {
 			assert.Contains(t, w.Body.String(), channel)
 		})
 	}
+}
+
+// Test for bogon/private IP fast-path in /api/v1/info
+func TestIPInfoHandlerBogon(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	appCache = cache.New(infoCacheExpiry, infoCacheExpiry)
+
+	router := gin.New()
+	router.GET("/api/v1/info/:ip", ipInfoHandler)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/info/127.0.0.1", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d", w.Code)
+	}
+
+	expected := `{"status":"ok","ip":"127.0.0.1","results":{"private_bogon":true,"message":"IP is private/bogon, lookup skipped"}}`
+	got := compactJSON(w.Body.String())
+	want := compactJSON(expected)
+	if got != want {
+		t.Fatalf("unexpected body.\nwant: %s\n got: %s", want, got)
+	}
+
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodGet, "/api/v1/info/127.0.0.1", nil)
+	router.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("cache request expected 200 got %d", w2.Code)
+	}
+}
+
+// Test for valid IP address in /api/v1/info
+func compactJSON(s string) string {
+	b := []byte(s)
+	var out []byte
+	var err error
+	var tmp interface{}
+	if err = json.Unmarshal(b, &tmp); err != nil {
+		// 如果不是严格 JSON（例如多余换行空格），尝试去掉空白再解码
+		return s // 回退原字符串
+	}
+	out, err = json.Marshal(tmp)
+	if err != nil {
+		return s
+	}
+	return string(out)
 }

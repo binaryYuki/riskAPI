@@ -75,24 +75,21 @@ type ResponseWithIP struct {
 	IP      string      `json:"ip,omitempty"`
 }
 
-// StatusCountMsg represents status count message
-type StatusCountMsg struct {
-	Timestamp int64 `json:"timestamp"`
-	Count     int   `json:"total_ip_count"`
+// InfoResponse represents the response structure for /api/v1/info
+type InfoResponse struct {
+	Status  string                 `json:"status"`
+	IP      string                 `json:"ip"`
+	Results map[string]interface{} `json:"results"`
 }
 
-// Global variables for data storage
 var (
-	// Data structures for storing risky IPs
-	riskySingleIPs map[string]bool   // Stores single IPs for quick lookup
+	_              map[string]bool   // Stores single IPs for quick lookup
 	riskyCIDRInfo  []CIDRInfo        // Stores parsed CIDR info
 	reasonMap      map[string]string // Stores reasons for IPs/CIDRs
 	riskyDataMutex sync.RWMutex      // Protects riskySingleIPs, riskyCIDRInfo, and reasonMap
 
-	// Cache
 	appCache *cache.Cache
 
-	// CDN/IDC IP 列表内存缓存
 	cdnIPCache    map[string][]CIDRInfo      // CDN IP 缓存 (edgeone, cloudflare, fastly)
 	idcIPCache    map[string][]CIDRInfo      // IDC IP 缓存 (aws, azure, gcp, etc.)
 	cdnSingleIPs  map[string]map[string]bool // CDN 单个 IP 缓存
@@ -100,6 +97,5 @@ var (
 	cdnIdcMutex   sync.RWMutex               // 保护 CDN/IDC 缓存的读写锁
 	cacheInitOnce sync.Once                  // 确保缓存只初始化一次
 
-	// Fastly related
 	fastlyCIDRsMutex sync.RWMutex
 )

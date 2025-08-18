@@ -263,7 +263,7 @@ func processIPAssociations(ipAssociations []IPAssociation) {
 
 	// Update global data structures
 	riskyDataMutex.Lock()
-	riskySingleIPs = newSingleIPs
+	_ = newSingleIPs
 	riskyCIDRInfo = newCIDRInfo
 	reasonMap = newReasonMap
 	riskyDataMutex.Unlock()
