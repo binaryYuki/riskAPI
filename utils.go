@@ -11,6 +11,7 @@ import (
 func getClientIPFromCDNHeaders(c *gin.Context) string {
 	// CDN headers priority order (从高到低优先级)
 	cdnHeaders := []string{
+  "EO-Client-IP",              // Edgeone 
 		"CF-Connecting-IP",         // Cloudflare
 		"X-Forwarded-For",          // Standard proxy header
 		"X-Real-IP",                // Nginx proxy
