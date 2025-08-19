@@ -9,27 +9,35 @@ import (
 
 // getClientIPFromCDNHeaders 优先从各大CDN的header中获取客户端IP
 func getClientIPFromCDNHeaders(c *gin.Context) string {
-	// CDN headers priority order (从高到低优先级)
+	// CDN headers priority order (Prioritize known CDN headers)
 	cdnHeaders := []string{
-  "EO-Client-IP",              // Edgeone 
-		"CF-Connecting-IP",         // Cloudflare
-		"X-Forwarded-For",          // Standard proxy header
-		"X-Real-IP",                // Nginx proxy
-		"X-Client-IP",              // Apache mod_remoteip
-		"X-Forwarded",              // RFC 7239
-		"X-Cluster-Client-IP",      // Cluster
-		"Forwarded-For",            // RFC 7239
+		// Edge Accelerators / CDN providers
+		"EO-Client-IP",       // Edgeone
+		"CF-Connecting-IP",   // Cloudflare
+		"True-Client-IP",     // Akamai and CloudFlare
+		"Fastly-Client-IP",   // Fastly
+		"ali-real-client-ip", // Alibaba Cloud ESA
+		"X-Azure-ClientIP",   // Azure
+		"X-Azure-SocketIP",   // Azure
+
+		// Basic / Common headers
 		"Forwarded",                // RFC 7239
-		"True-Client-IP",           // Akamai and CloudFlare
-		"X-Original-Forwarded-For", // AWS ALB
-		"X-Azure-ClientIP",         // Azure
-		"X-Azure-SocketIP",         // Azure
-		"Fastly-Client-IP",         // Fastly
-		"X-Varnish-Client-IP",      // Varnish
-		"WL-Proxy-Client-IP",       // WebLogic
-		"Proxy-Client-IP",          // Proxy
-		"HTTP_CLIENT_IP",           // Client IP
-		"HTTP_X_FORWARDED_FOR",     // X-Forwarded-For variant
+		"X-Forwarded-For",          // Factory standard
+		"X-Original-Forwarded-For", // AWS ALB / ELB
+
+		// General headers (common across many proxies)
+		"X-Real-IP",           // Nginx proxy
+		"X-Client-IP",         // Apache mod_remoteip
+		"X-Cluster-Client-IP", // Cluster
+		"X-Varnish-Client-IP", // Varnish
+
+		// Legacy / Non-standard headers
+		"X-Forwarded",          // old standard
+		"Forwarded-For",        // non standard
+		"HTTP_X_FORWARDED_FOR", // PHP / CGI
+		"HTTP_CLIENT_IP",       // Client IP from HTTP headers
+		"WL-Proxy-Client-IP",   // WebLogic
+		"Proxy-Client-IP",      // Generic Proxy
 	}
 
 	for _, header := range cdnHeaders {
@@ -49,10 +57,11 @@ func getClientIPFromCDNHeaders(c *gin.Context) string {
 	}
 
 	// 如果CDN headers中没有找到有效IP，则使用gin的ClientIP()作为fallback
+	// IF no valid IP found in CDN headers, fallback to gin's ClientIP()
 	return c.ClientIP()
 }
 
-// isValidIP 检查IP地址格式是否有效
+// isValidIP 检查IP地址格式是否有效 Checks if the IP address format is valid
 func isValidIP(ip string) bool {
 	return net.ParseIP(ip) != nil
 }
@@ -123,15 +132,15 @@ func isBogonOrPrivateIP(ip string) bool {
 		}
 		// 公共但特殊/测试/文档/多播等
 		v4Bogon := []string{
-			"0.0.0.0/8",          // 无效源
+			"0.0.0.0/8",          // 无效源 / Unspecified
 			"192.0.0.0/24",       // IETF PROTOCOL ASSIGNMENTS
-			"192.0.2.0/24",       // TEST-NET-1 (文档)
-			"198.18.0.0/15",      // 性能基准测试网络
+			"192.0.2.0/24",       // TEST-NET-1 / 测试网络
+			"198.18.0.0/15",      // Benchmarking (RFC 2544) / 基准测试
 			"198.51.100.0/24",    // TEST-NET-2
 			"203.0.113.0/24",     // TEST-NET-3
-			"224.0.0.0/4",        // 多播
-			"240.0.0.0/4",        // 未来保留
-			"255.255.255.255/32", // 广播
+			"224.0.0.0/4",        // 多播 / Multicast
+			"240.0.0.0/4",        // 未来保留 / Reserved for future use
+			"255.255.255.255/32", // Broadcast / 广播地址
 		}
 		for _, cidr := range v4Bogon {
 			_, n, err := net.ParseCIDR(cidr)
@@ -139,7 +148,7 @@ func isBogonOrPrivateIP(ip string) bool {
 				return true
 			}
 		}
-		return false // 其余 IPv4 视为公网
+		return false
 	}
 
 	// IPv6 处理（纯 IPv6，不含 IPv4-mapped 已在上面 To4 分支处理）
