@@ -197,6 +197,28 @@ jobs:
           git add -A -- providers
           OUTSIDE_CHANGES="$(git status --porcelain | grep -v ' providers/' || true)"
           if [ -n "${OUTSIDE_CHANGES}" ]; then
+            OUTSIDE_COUNT="$(echo "$OUTSIDE_CHANGES" | wc -l)"
+          
+            echo "::warning title=Non-providers changes::Found $OUTSIDE_COUNT files outside /providers directory that will be reset"
+          
+            echo "::group::📋 Files outside /providers (will be reset)"
+            echo "$OUTSIDE_CHANGES" | while IFS= read -r line; do
+              echo "  $line"
+            done
+            echo "::endgroup::"
+
+            {
+              echo "## ⚠️ Non-providers Changes Reset"
+              echo ""
+              echo "Found **$OUTSIDE_COUNT** files outside the \`providers/\` directory that were automatically reset:"
+              echo ""
+              echo '```diff'
+              echo "$OUTSIDE_CHANGES"
+              echo '```'
+              echo ""
+              echo "✅ These changes were automatically excluded from the commit to keep the repository clean."
+            } >> "$GITHUB_STEP_SUMMARY"
+          
             echo "Detected changes outside /providers; resetting them."
             git restore --staged :/
             git checkout -- .
