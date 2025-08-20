@@ -4,6 +4,18 @@ on:
   push:
     branches:
       - master
+    paths:
+      - '**'
+      - '!README.md'
+      - '!docs/**'
+      - '!.github/**'
+  workflow_run:
+    workflows: [ "Update MMDB Databases" ]
+    types:
+      - completed
+    branches:
+      - master
+  workflow_dispatch:
 
 jobs:
   build-and-push:
