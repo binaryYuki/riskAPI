@@ -195,7 +195,7 @@ jobs:
         run: |
           set -euxo pipefail
           git add -A -- providers
-          OUTSIDE_CHANGES="$(git status --porcelain | grep -vE '^(A|M|R|D|\?\?) providers/' || true)"
+          OUTSIDE_CHANGES="$(git status --porcelain | grep -v ' providers/' || true)"
           if [ -n "${OUTSIDE_CHANGES}" ]; then
             echo "Detected changes outside /providers; resetting them."
             git restore --staged :/
