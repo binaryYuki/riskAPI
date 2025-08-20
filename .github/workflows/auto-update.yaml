@@ -190,6 +190,10 @@ jobs:
             git rebase --abort || true
           }
 
+      - name: Cleanup temporary files
+        run: |
+          rm -rf tmp_mmdb
+
       - name: Check changes under /providers only
         id: diff
         run: |
