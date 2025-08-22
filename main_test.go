@@ -624,7 +624,7 @@ func TestCheckIPHandlerCases(t *testing.T) {
 	}{
 		{"127.0.0.1", http.StatusOK, "private/bogon"},
 		{"10.0.0.1", http.StatusOK, "private/bogon"},
-		{"8.8.8.8", http.StatusOK, "ok"},
+		{"8.8.8.8", http.StatusOK, "risky"},
 		{"invalid-ip", http.StatusBadRequest, "Invalid IP address format"},
 		{"203.0.113.1", http.StatusOK, "ok"},
 	}
@@ -641,4 +641,60 @@ func TestCheckIPHandlerCases(t *testing.T) {
 			t.Errorf("ip=%s want body contain %s got %s", c.ip, c.want, w.Body.String())
 		}
 	}
+}
+
+func TestFlushCacheHandler(t *testing.T) {
+	resetTestGlobals()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/api/cache/flush/:method/*range", flushCacheHandler)
+	// 写入缓存
+	appCache.Set("info:1.1.1.1", "test1")
+	appCache.Set("info:2.2.2.2", "test2")
+	// 单条删除
+	w1 := httptest.NewRecorder()
+	req1, _ := http.NewRequest(http.MethodPost, "/api/cache/flush/info/1.1.1.1", nil)
+	r.ServeHTTP(w1, req1)
+	assert.Equal(t, http.StatusOK, w1.Code)
+	_, found := appCache.Get("info:1.1.1.1")
+	assert.False(t, found)
+	// 全部清空
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodPost, "/api/cache/flush/info/all", nil)
+	r.ServeHTTP(w2, req2)
+	_, found2 := appCache.Get("info:2.2.2.2")
+	assert.False(t, found2)
+	// 无效参数
+	w3 := httptest.NewRecorder()
+	req3, _ := http.NewRequest(http.MethodPost, "/api/cache/flush/unknown/xxx", nil)
+	r.ServeHTTP(w3, req3)
+	assert.Equal(t, http.StatusBadRequest, w3.Code)
+}
+
+func TestMetricsVersionFilterProxies(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/metrics", metricsHandler)
+	r.GET("/version", versionHandler)
+	r.POST("/filter-proxies", filterProxiesHandler)
+	// metrics
+	w1 := httptest.NewRecorder()
+	req1, _ := http.NewRequest(http.MethodGet, "/api/metrics", nil)
+	r.ServeHTTP(w1, req1)
+	assert.Equal(t, http.StatusOK, w1.Code)
+	assert.Contains(t, w1.Body.String(), "status")
+	// version
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodGet, "/version", nil)
+	r.ServeHTTP(w2, req2)
+	assert.Equal(t, http.StatusOK, w2.Code)
+	assert.Contains(t, w2.Body.String(), "version")
+	// filter-proxies
+	body := `[{"name":"p1","server":"1.1.1.1"},{"name":"p2","server":"8.8.8.8"}]`
+	w3 := httptest.NewRecorder()
+	req3, _ := http.NewRequest(http.MethodPost, "/filter-proxies", strings.NewReader(body))
+	req3.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w3, req3)
+	assert.Equal(t, http.StatusOK, w3.Code)
+	assert.Contains(t, w3.Body.String(), "filtered_count")
 }
