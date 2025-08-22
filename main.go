@@ -9,7 +9,6 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/patrickmn/go-cache"
 )
 
 func main() {
@@ -18,7 +17,7 @@ func main() {
 	log.Printf("GOMAXPROCS set to %d", runtime.GOMAXPROCS(0))
 
 	// Initialize cache and data structures
-	appCache = cache.New(ipCacheExpiry, 10*time.Minute)
+	appCache = NewRadixCache()
 	_ = make(map[string]bool)
 	riskyCIDRInfo = make([]CIDRInfo, 0)
 	reasonMap = make(map[string]string)

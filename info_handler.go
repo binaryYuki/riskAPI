@@ -31,7 +31,7 @@ func ipInfoHandler(c *gin.Context) {
 			"private_bogon": true,
 			"message":       "IP is private/bogon, lookup skipped",
 		}}
-		appCache.Set("info:"+ipStr, resp, infoCacheExpiry)
+		appCache.Set("info:"+ipStr, resp)
 		c.Header("X-Catyuki-Cache", "MISS") // 私网/bogon 快速路径视为未命中缓存
 		c.IndentedJSON(http.StatusOK, resp)
 		return
@@ -118,7 +118,7 @@ func ipInfoHandler(c *gin.Context) {
 
 RESPONSE:
 	resp := InfoResponse{Status: "ok", IP: ipStr, Results: results}
-	appCache.Set(cacheKey, resp, infoCacheExpiry)
+	appCache.Set(cacheKey, resp)
 	c.IndentedJSON(http.StatusOK, resp)
 }
 

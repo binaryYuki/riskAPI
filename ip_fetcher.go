@@ -276,7 +276,7 @@ func processIPAssociations(ipAssociations []IPAssociation) {
 	for _, association := range ipAssociations {
 		cacheData.Entries = append(cacheData.Entries, association.Entry)
 	}
-	appCache.Set(ipCacheKey, cacheData, ipCacheExpiry)
+	appCache.Set(ipCacheKey, cacheData)
 
 	fmt.Printf("Updated IP lists: %d single IPs, %d CIDR ranges\n", len(newSingleIPs), len(newCIDRInfo))
 }
