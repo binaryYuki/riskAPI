@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"github.com/patrickmn/go-cache"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +15,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 )
+
+// 测试辅助函数：重置全局状态
+func resetTestGlobals() {
+	appCache = NewRadixCache()
+	reasonMap = make(map[string]string)
+	riskyCIDRInfo = nil
+}
 
 func TestHandleError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -240,7 +246,7 @@ func TestAllRiskyChannelsAuto(t *testing.T) {
 // Test for bogon/private IP fast-path in /api/v1/info
 func TestIPInfoHandlerBogon(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	appCache = cache.New(infoCacheExpiry, infoCacheExpiry)
+	resetTestGlobals()
 
 	router := gin.New()
 	router.GET("/api/v1/info/:ip", ipInfoHandler)
@@ -287,7 +293,8 @@ func compactJSON(s string) string {
 
 func TestCDNBaseAddressAndFlushReload(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	appCache = cache.New(ipCacheExpiry, ipCacheExpiry)
+	resetTestGlobals()
+
 	initCDNIDCCache()
 	cidrNet, cidrStr, err := firstCDN24("edgeone")
 	if err != nil {
@@ -531,7 +538,7 @@ func TestFlushRiskSingleAndAll(t *testing.T) {
 
 // info 缓存 flush
 func TestFlushInfoCache(t *testing.T) {
-	appCache = cache.New(infoCacheExpiry, infoCacheExpiry)
+	resetTestGlobals()
 	r := setupTestRouter()
 	ip := "8.8.8.8"
 	w1 := httptest.NewRecorder()
@@ -562,8 +569,8 @@ func TestFlushInfoCache(t *testing.T) {
 
 // 路由参数 vs 客户端 IP 一致性
 func TestRouteParamVsClientIPConsistency(t *testing.T) {
-	resetRiskData()
-	appCache = cache.New(infoCacheExpiry, infoCacheExpiry)
+	resetTestGlobals()
+	appCache = NewRadixCache()
 	r := setupTestRouter()
 	ip := "1.1.1.1"
 	w1 := httptest.NewRecorder()
@@ -586,4 +593,52 @@ func extractStatus(body string) string {
 	}
 	v, _ := m["status"].(string)
 	return v
+}
+
+func TestInfoCacheHitMiss(t *testing.T) {
+	resetTestGlobals()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/v1/info/:ip", ipInfoHandler)
+	ip := "8.8.8.8"
+	w1 := httptest.NewRecorder()
+	req1, _ := http.NewRequest(http.MethodGet, "/api/v1/info/"+ip, nil)
+	r.ServeHTTP(w1, req1)
+	assert.Equal(t, "MISS", w1.Header().Get("X-Catyuki-Cache"))
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodGet, "/api/v1/info/"+ip, nil)
+	r.ServeHTTP(w2, req2)
+	assert.Equal(t, "HIT", w2.Header().Get("X-Catyuki-Cache"))
+}
+
+func TestCheckIPHandlerCases(t *testing.T) {
+	resetTestGlobals()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/v1/ip/:ip", checkIPHandler)
+
+	cases := []struct {
+		ip     string
+		status int
+		want   string
+	}{
+		{"127.0.0.1", http.StatusOK, "private/bogon"},
+		{"10.0.0.1", http.StatusOK, "private/bogon"},
+		{"8.8.8.8", http.StatusOK, "ok"},
+		{"invalid-ip", http.StatusBadRequest, "Invalid IP address format"},
+		{"203.0.113.1", http.StatusOK, "ok"},
+	}
+	// 设置风险 IP
+	reasonMap["8.8.8.8"] = "Test reason"
+	for _, c := range cases {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/ip/"+c.ip, nil)
+		r.ServeHTTP(w, req)
+		if w.Code != c.status {
+			t.Errorf("ip=%s want status=%d got=%d", c.ip, c.status, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), c.want) {
+			t.Errorf("ip=%s want body contain %s got %s", c.ip, c.want, w.Body.String())
+		}
+	}
 }

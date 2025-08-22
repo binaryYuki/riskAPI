@@ -5,7 +5,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/patrickmn/go-cache"
+	"github.com/armon/go-radix"
 )
 
 // FastlyIPList represents Fastly IP list structure
@@ -82,13 +82,64 @@ type InfoResponse struct {
 	Results map[string]interface{} `json:"results"`
 }
 
+// RadixCache 封装 radix.Tree，实现与 cache.Cache 兼容的接口
+// 支持 Set/Get/Delete/Flush/Items 方法
+// 仅支持永久缓存（不支持自动过期），如需过期可扩展
+
+type RadixCache struct {
+	tree  *radix.Tree
+	mutex sync.RWMutex
+}
+
+func NewRadixCache() *RadixCache {
+	return &RadixCache{
+		tree: radix.New(),
+	}
+}
+
+func (rc *RadixCache) Set(key string, value interface{}, _ ...interface{}) {
+	rc.mutex.Lock()
+	defer rc.mutex.Unlock()
+	rc.tree.Insert(key, value)
+}
+
+func (rc *RadixCache) Get(key string) (interface{}, bool) {
+	rc.mutex.RLock()
+	defer rc.mutex.RUnlock()
+	v, ok := rc.tree.Get(key)
+	return v, ok
+}
+
+func (rc *RadixCache) Delete(key string) {
+	rc.mutex.Lock()
+	defer rc.mutex.Unlock()
+	rc.tree.Delete(key)
+}
+
+func (rc *RadixCache) Flush() {
+	rc.mutex.Lock()
+	defer rc.mutex.Unlock()
+	rc.tree = radix.New()
+}
+
+func (rc *RadixCache) Items() map[string]interface{} {
+	rc.mutex.RLock()
+	defer rc.mutex.RUnlock()
+	items := make(map[string]interface{})
+	rc.tree.Walk(func(s string, v interface{}) bool {
+		items[s] = v
+		return false
+	})
+	return items
+}
+
 var (
 	_              map[string]bool   // Stores single IPs for quick lookup
 	riskyCIDRInfo  []CIDRInfo        // Stores parsed CIDR info
 	reasonMap      map[string]string // Stores reasons for IPs/CIDRs
 	riskyDataMutex sync.RWMutex      // Protects riskySingleIPs, riskyCIDRInfo, and reasonMap
 
-	appCache *cache.Cache
+	appCache *RadixCache
 
 	cdnIPCache    map[string][]CIDRInfo      // CDN IP 缓存 (edgeone, cloudflare, fastly)
 	idcIPCache    map[string][]CIDRInfo      // IDC IP 缓存 (aws, azure, gcp, etc.)
