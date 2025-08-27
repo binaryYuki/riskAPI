@@ -34,6 +34,10 @@ func CorrelationMiddleware() gin.HandlerFunc {
 // LoggingMiddleware logs HTTP requests
 func LoggingMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/.well-known/") {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
 		start := time.Now()
 		c.Next()
 		latency := time.Since(start)
@@ -43,7 +47,7 @@ func LoggingMiddleware() gin.HandlerFunc {
 			time.Now().Format("2006/01/02 - 15:04:05"),
 			status,
 			latency,
-			c.ClientIP(),
+			getClientIPFromCDNHeaders(c),
 			c.Request.URL.Path,
 			correlationID,
 		)
