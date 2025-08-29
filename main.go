@@ -51,6 +51,7 @@ func main() {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(cors.New(corsConfig))
+	router.Use(CrossOriginResourcePolicyMiddleware())
 	router.Use(CorrelationMiddleware())
 	router.Use(LoggingMiddleware())
 	router.Use(SensitivePathMiddleware())
