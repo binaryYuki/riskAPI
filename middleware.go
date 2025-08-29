@@ -74,3 +74,11 @@ func SensitivePathMiddleware() gin.HandlerFunc {
 		}
 	}
 }
+
+// CrossOriginResourcePolicyMiddleware 设置 cross-origin-resource-policy 响应头
+func CrossOriginResourcePolicyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cross-Origin-Resource-Policy", "cross-origin")
+		c.Next()
+	}
+}
