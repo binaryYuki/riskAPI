@@ -247,9 +247,20 @@ func notFoundHandler(c *gin.Context) {
 // metricsHandler 返回当前解析/抓取统计快照
 func metricsHandler(c *gin.Context) {
 	snapshot := getMetricsSnapshot()
+	// 追加蜜罐指标
+	hits, fake, blocks, penalty, offenders := HoneytrapMetricsSnapshot()
 	c.IndentedJSON(http.StatusOK, Response{
-		Status:  "ok",
-		Message: snapshot,
+		Status: "ok",
+		Message: gin.H{
+			"parser": snapshot,
+			"honeytrap": gin.H{
+				"hits_total":           hits,
+				"fake_ok_total":        fake,
+				"blocks_total":         blocks,
+				"penalty_ms_total":     penalty,
+				"unique_offenders_cnt": offenders,
+			},
+		},
 	})
 }
 
