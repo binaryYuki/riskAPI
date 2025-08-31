@@ -54,6 +54,8 @@ func main() {
 	router.Use(CrossOriginResourcePolicyMiddleware())
 	router.Use(CorrelationMiddleware())
 	router.Use(LoggingMiddleware())
+	// 蜜罐中间件：从环境变量读取配置
+	router.Use(Honeytrap(HoneytrapConfigFromEnv()))
 	router.Use(SensitivePathMiddleware())
 
 	// Start background services
@@ -64,6 +66,8 @@ func main() {
 
 	// Setup routes
 	setupRoutes(router)
+	// 可选诱饵路由（通过 HONEYTRAP_DECOYS=true 启用）
+	registerDecoys(router)
 
 	// Start server with optimized settings for high concurrency
 	log.Printf("Starting server on port 8080...")
