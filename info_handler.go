@@ -97,6 +97,17 @@ func ipInfoHandler(c *gin.Context) {
 		}
 	}
 
+	// 查询纯真数据库（优先级较高，因为是本地查询，速度最快）
+	if country, area, err := QueryQQWryIP(ipStr); err == nil {
+		qqwryData := map[string]interface{}{
+			"data": ParseQQWryCountry(country),
+			"area": area,
+		}
+		results["qqwry"] = qqwryData
+	} else {
+		log.Printf("[error] provider_qqwry_fail ip=%s err=%v correlation_id=%v", ipStr, err, getCorrelationID(c))
+	}
+
 	// 仅当其它 provider 判定为中国(CN) 且 IP 适合时再调用美团 API；否则(非中国)调用 ip.sb
 	if isChina(results) {
 		if meituan.Suitable(ipStr) {
