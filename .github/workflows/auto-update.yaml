@@ -26,7 +26,7 @@ jobs:
       - name: Prepare directories
         run: |
           set -euxo pipefail
-          mkdir -p providers/maxmind providers/ipinfo providers/iplocate tmp_mmdb
+          mkdir -p providers/maxmind providers/ipinfo providers/iplocate providers/qqwry tmp_mmdb
 
       # ---------------- MaxMind via geoipupdate ----------------
       - name: Install geoipupdate
@@ -81,6 +81,7 @@ jobs:
             echo "IPINFO_TOKEN not set, skipping IPinfo."
           fi
 
+      # ---------------- IPLocate ----------------
       - name: Download IPLocate databases (Country & ASN)
         env:
           IPLOCATE_DOWNLOAD_URL: ${{ secrets.IPLOCATE_DOWNLOAD_URL }}
@@ -169,12 +170,73 @@ jobs:
             fi
           fi
 
+      # ---------------- QQWry (纯真) ----------------
+      - name: Install jq (for QQWry latest version parsing)
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Update QQWry (纯真) qqwry.dat from metowolf
+        run: |
+          set -euxo pipefail
+          mkdir -p providers/qqwry tmp_mmdb
+
+          VERSION_JSON_URL="https://raw.githubusercontent.com/metowolf/qqwry.dat/refs/heads/main/version.json"
+          LATEST="$(curl -fsSL "$VERSION_JSON_URL" | jq -r '.latest' || true)"
+
+          if [ -z "$LATEST" ] || ! echo "$LATEST" | grep -Eq '^[0-9]{8}$'; then
+            echo "Could not determine latest QQWry version from version.json, skipping QQWry."
+            exit 0
+          fi
+
+          DOWNLOAD_URL="https://github.com/metowolf/qqwry.dat/releases/download/${LATEST}/qqwry.dat"
+          echo "Latest QQWry version: $LATEST"
+          echo "Downloading: $DOWNLOAD_URL"
+
+          # 拉取 qqwry.dat（25MB 左右）
+          curl -fSL --retry 3 --retry-all-errors "$DOWNLOAD_URL" -o tmp_mmdb/qqwry.dat
+
+          # 基本有效性检查（文件大小 > 10MB）
+          ACTUAL_SIZE=$(wc -c < tmp_mmdb/qqwry.dat)
+          if [ "$ACTUAL_SIZE" -lt 10000000 ]; then
+            echo "Downloaded qqwry.dat seems too small (${ACTUAL_SIZE} bytes), skipping update."
+            exit 0
+          fi
+
+          NEW_SHA="$(sha256sum tmp_mmdb/qqwry.dat | awk '{print $1}')"
+          OLD_SHA=""
+          if [ -f providers/qqwry/qqwry.dat ]; then
+            OLD_SHA="$(sha256sum providers/qqwry/qqwry.dat | awk '{print $1}')"
+          fi
+
+          if [ "$NEW_SHA" != "$OLD_SHA" ]; then
+            cp -f tmp_mmdb/qqwry.dat providers/qqwry/qqwry.dat
+            {
+              echo "## 🔄 QQWry Updated"
+              echo ""
+              echo "- Version: **$LATEST**"
+              echo "- sha256: \`$NEW_SHA\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "QQWry updated to ${LATEST}."
+          else
+            {
+              echo "## ✅ QQWry Already Up-to-date"
+              echo ""
+              echo "- Version: **$LATEST**"
+              echo "- sha256: \`$NEW_SHA\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "QQWry already up to date (${LATEST})."
+          fi
 
       # ---------------- Normalize / Validate (optional light checks) ----------------
       - name: List resulting files
         run: |
           set -euxo pipefail
+          echo "MMDB files:"
           find providers -maxdepth 2 -type f -name "*.mmdb" -print || true
+          echo "QQWry dat file:"
+          find providers/qqwry -maxdepth 1 -type f -name "qqwry.dat" -print || true
 
       # ---------------- Commit & Push (providers path only) ----------------
       - name: Git configure & pre-sync
