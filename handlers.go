@@ -384,3 +384,12 @@ func removeRiskEntry(entry string) bool {
 	}
 	return removed
 }
+
+// qqwryStatsHandler 处理纯真数据库状态查询请求
+func qqwryStatsHandler(c *gin.Context) {
+	stats := GetQQWryStats()
+	c.IndentedJSON(http.StatusOK, Response{
+		Status:  "ok",
+		Message: stats,
+	})
+}

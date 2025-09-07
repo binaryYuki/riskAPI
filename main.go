@@ -22,6 +22,14 @@ func main() {
 	riskyCIDRInfo = make([]CIDRInfo, 0)
 	reasonMap = make(map[string]string)
 
+	// Initialize QQWry database
+	log.Printf("Initializing QQWry database...")
+	if err := InitQQWryDatabase(); err != nil {
+		log.Printf("Warning: Failed to initialize QQWry database: %v", err)
+	} else {
+		log.Printf("QQWry database initialized successfully")
+	}
+
 	// Get configuration
 	allowedDomains := getAllowedDomains()
 	config := getDefaultConfig()
@@ -127,4 +135,7 @@ func setupRoutes(router *gin.Engine) {
 
 	router.GET("/api/cache/flush", flushCacheIndexHandler)
 	router.POST("/api/cache/flush/:method/*range", flushCacheHandler)
+
+	// 纯真数据库状态路由
+	router.GET("/api/qqwry/stats", qqwryStatsHandler)
 }
