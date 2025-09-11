@@ -2,12 +2,16 @@ package main
 
 import (
 	"bufio"
-	"github.com/gin-gonic/gin"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 var version = "dev"
@@ -392,4 +396,35 @@ func qqwryStatsHandler(c *gin.Context) {
 		Status:  "ok",
 		Message: stats,
 	})
+}
+
+// exportCIDRsHandler 导出所有风险 CIDR 为文本，并注释来源
+func exportCIDRsHandler(c *gin.Context) {
+	// 收集并格式化所有 CIDR
+	var lines []string
+	// 加锁读取
+	riskyDataMutex.RLock()
+	for _, ci := range riskyCIDRInfo {
+		src := reasonMap[ci.OriginalCIDR]
+		if strings.TrimSpace(src) == "" {
+			src = "unknown"
+		}
+		lines = append(lines, ci.OriginalCIDR+" # "+src)
+	}
+	riskyDataMutex.RUnlock()
+
+	// 排序稳定输出
+	if len(lines) == 0 {
+		c.Header("Content-Type", "text/plain; charset=utf-8")
+		c.String(http.StatusOK, "# empty\n")
+		return
+	}
+	// 简单字典序
+	sort.Strings(lines)
+
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+	c.Header("Cache-Control", "public, max-age=1800, immutable") // 30分钟
+	c.Header("X-Last-Updated", time.DateTime)
+	c.Header("X-Total-Count", strconv.Itoa(len(lines)))
+	c.String(http.StatusOK, strings.Join(lines, "\n"))
 }

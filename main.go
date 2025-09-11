@@ -138,4 +138,7 @@ func setupRoutes(router *gin.Engine) {
 
 	// 纯真数据库状态路由
 	router.GET("/api/qqwry/stats", qqwryStatsHandler)
+
+	// 新增：导出所有 CIDR
+	router.GET("/api/export", exportCIDRsHandler)
 }
