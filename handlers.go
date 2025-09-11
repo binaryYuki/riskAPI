@@ -424,7 +424,7 @@ func exportCIDRsHandler(c *gin.Context) {
 
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.Header("Cache-Control", "public, max-age=1800, immutable") // 30分钟
-	c.Header("X-Last-Updated", time.DateTime)
+	c.Header("X-Last-Updated", time.Now().UTC().Format(time.RFC3339))
 	c.Header("X-Total-Count", strconv.Itoa(len(lines)))
 	c.String(http.StatusOK, strings.Join(lines, "\n"))
 }
