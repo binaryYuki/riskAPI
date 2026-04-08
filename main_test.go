@@ -2,6 +2,10 @@ package main
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -697,4 +701,105 @@ func TestMetricsVersionFilterProxies(t *testing.T) {
 	r.ServeHTTP(w3, req3)
 	assert.Equal(t, http.StatusOK, w3.Code)
 	assert.Contains(t, w3.Body.String(), "filtered_count")
+}
+
+func TestParseProxyHandler_MissingURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/v1/parse", parseProxyHandler)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/parse", nil)
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Missing required query parameter: url")
+}
+
+func TestParseProxyHandler_ForwardAndVV(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	oldBase := parseWorkerBase
+	oldSecret := parseVVSecret
+	oldClient := parseHTTPClient
+	t.Cleanup(func() {
+		parseWorkerBase = oldBase
+		parseVVSecret = oldSecret
+		parseHTTPClient = oldClient
+	})
+
+	secret := "unit-test-secret"
+	targetURL := "https://www.xiaohongshu.com/explore/abc123"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST got %s", r.Method)
+		}
+		if r.URL.Path != "/api/parse" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+
+		vv := r.URL.Query().Get("_vv")
+		if vv == "" {
+			t.Fatal("missing _vv")
+		}
+		if !verifyVVForURL(secret, vv, targetURL) {
+			t.Fatalf("invalid vv: %s", vv)
+		}
+
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body failed: %v", err)
+		}
+		if got, _ := body["url"].(string); got != targetURL {
+			t.Fatalf("unexpected body url: %s", got)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	parseWorkerBase = upstream.URL
+	parseVVSecret = secret
+	parseHTTPClient = upstream.Client()
+
+	r := gin.New()
+	r.GET("/api/v1/parse", parseProxyHandler)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/parse?url="+targetURL, nil)
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"ok":true}`, w.Body.String())
+}
+
+func verifyVVForURL(secret, vv, targetURL string) bool {
+	parts := strings.Split(vv, ".")
+	if len(parts) != 4 || parts[0] != "v1" {
+		return false
+	}
+
+	version := parts[0]
+	ts := parts[1]
+	nonce := parts[2]
+	sig := parts[3]
+
+	bodyText := `{"url":"` + targetURL + `"}`
+	bodyHash := sha256HexTest(bodyText)
+	plain := strings.Join([]string{version, ts, nonce, "POST", "/api/parse", bodyHash, targetURL}, "\n")
+	expected := hmacSHA256Base64URLTest(secret, plain)
+	return sig == expected
+}
+
+func sha256HexTest(text string) string {
+	s := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(s[:])
+}
+
+func hmacSHA256Base64URLTest(secret, text string) string {
+	m := hmac.New(sha256.New, []byte(secret))
+	_, _ = m.Write([]byte(text))
+	return strings.TrimRight(base64.URLEncoding.EncodeToString(m.Sum(nil)), "=")
 }
