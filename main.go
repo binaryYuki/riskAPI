@@ -116,6 +116,7 @@ func setupRoutes(router *gin.Engine) {
 	router.GET("/api/status", statusHandler)
 
 	router.GET("/api/v1/info", ipInfoHandler)
+	router.GET("/api/v1/parse", parseProxyHandler)
 	infoGroup := router.Group("/api/v1/info")
 	{
 		infoGroup.GET("/:ip", ipInfoHandler)
