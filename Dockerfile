@@ -13,6 +13,11 @@ RUN apk add --no-cache git
 # Copy project files
 COPY . .
 
+# 地理位置数据库不入 git，构建前需先运行 scripts/fetch-geo-data.sh
+RUN for f in maxmind/GeoLite2-Country.mmdb maxmind/GeoLite2-ASN.mmdb qqwry/qqwry.dat; do \
+      test -s "providers/$f" || { echo "missing providers/$f: run ./scripts/fetch-geo-data.sh before docker build" >&2; exit 1; }; \
+    done
+
 # Cache Go modules
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download -x

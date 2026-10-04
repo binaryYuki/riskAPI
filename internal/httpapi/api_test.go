@@ -173,6 +173,9 @@ func TestIPInfoBogon(t *testing.T) {
 }
 
 func TestInfoCacheHitMiss(t *testing.T) {
+	if _, err := os.Stat(filepath.Join(testProvidersDir, "maxmind", "GeoLite2-Country.mmdb")); err != nil {
+		t.Skip("geo databases not present; run ./scripts/fetch-geo-data.sh")
+	}
 	env := newTestEnv(t)
 	w1 := env.do(http.MethodGet, "/api/v1/info/8.8.8.8")
 	assert.Equal(t, http.StatusOK, w1.Code)
