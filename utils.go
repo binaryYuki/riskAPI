@@ -7,58 +7,24 @@ import (
 	"strings"
 )
 
-// getClientIPFromCDNHeaders 优先从各大CDN的header中获取客户端IP
+// getClientIPFromCDNHeaders 解析真实客户端 IP
+// 只有直连对端是可信代理（TRUSTED_PROXIES 或已知 CDN 网段）时才读取转发头，
+// 否则直接使用对端地址，防止客户端通过伪造请求头冒充任意 IP。
 func getClientIPFromCDNHeaders(c *gin.Context) string {
-	// CDN headers priority order (Prioritize known CDN headers)
-	cdnHeaders := []string{
-		// Edge Accelerators / CDN providers
-		"EO-Client-IP",       // Edgeone
-		"CF-Connecting-IP",   // Cloudflare
-		"True-Client-IP",     // Akamai and CloudFlare
-		"Fastly-Client-IP",   // Fastly
-		"ali-real-client-ip", // Alibaba Cloud ESA
-		"X-Azure-ClientIP",   // Azure
-		"X-Azure-SocketIP",   // Azure
-
-		// Basic / Common headers
-		"Forwarded",                // RFC 7239
-		"X-Forwarded-For",          // Factory standard
-		"X-Original-Forwarded-For", // AWS ALB / ELB
-
-		// General headers (common across many proxies)
-		"X-Real-IP",           // Nginx proxy
-		"X-Client-IP",         // Apache mod_remoteip
-		"X-Cluster-Client-IP", // Cluster
-		"X-Varnish-Client-IP", // Varnish
-
-		// Legacy / Non-standard headers
-		"X-Forwarded",          // old standard
-		"Forwarded-For",        // non standard
-		"HTTP_X_FORWARDED_FOR", // PHP / CGI
-		"HTTP_CLIENT_IP",       // Client IP from HTTP headers
-		"WL-Proxy-Client-IP",   // WebLogic
-		"Proxy-Client-IP",      // Generic Proxy
+	peer := c.RemoteIP()
+	if !isTrustedProxy(peer) {
+		return peer
 	}
 
-	for _, header := range cdnHeaders {
-		headerValue := c.GetHeader(header)
-		if headerValue != "" {
-			// Handle comma-separated IPs (like X-Forwarded-For)
-			ips := strings.Split(headerValue, ",")
-			for _, ip := range ips {
-				ip = strings.TrimSpace(ip)
-				// 修改: 不再在此处过滤私网/保留 IP，避免所有来源都被视为 bogon 的情况；
-				// 统一由后续逻辑 (checkRequestIPHandler 中 isBogonOrPrivateIP) 再判定。
-				if ip != "" && isValidIP(ip) {
-					return ip
-				}
-			}
+	for _, header := range clientIPHeaders {
+		if ip := strings.TrimSpace(c.GetHeader(header)); isValidIP(ip) {
+			return ip
 		}
 	}
-
-	// 如果CDN headers中没有找到有效IP，则使用gin的ClientIP()作为fallback
-	// IF no valid IP found in CDN headers, fallback to gin's ClientIP()
-	return c.ClientIP()
+	if ip := clientIPFromForwardedFor(c.GetHeader("X-Forwarded-For")); ip != "" {
+		return ip
+	}
+	return peer
 }
 
 // isValidIP 检查IP地址格式是否有效 Checks if the IP address format is valid

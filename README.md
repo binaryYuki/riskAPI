@@ -109,6 +109,13 @@ docker-compose up -d
 | `HONEYTRAP_BASE_DELAY_MAX_MS` | Maximum honeypot delay (ms) | `500` |
 | `HONEYTRAP_BLOCK_THRESHOLD` | Block threshold (attempts) | `5` |
 | `HONEYTRAP_BLOCK_DURATION` | Block duration (seconds) | `300` |
+| `HONEYTRAP_MAX_OFFENDERS` | Max tracked honeypot offenders | `100000` |
+| `ADMIN_TOKEN` | Bearer token for `/api/cache/flush*`; admin endpoints are disabled when unset | _(unset)_ |
+| `TRUSTED_PROXIES` | Comma-separated CIDRs/IPs whose forwarding headers are trusted (known CDN ranges are always trusted) | loopback + private ranges |
+| `PARSE_VV_SECRET` | HMAC secret for `/api/v1/parse`; the endpoint returns 503 when unset | _(unset)_ |
+| `PARSE_WORKER_BASE` | Upstream parse worker base URL | `https://xhs-proxy.tzpro.workers.dev` |
+| `PARSE_RATE_LIMIT_PER_MIN` | Per-client-IP limit for `/api/v1/parse` (`0` disables) | `30` |
+| `INFO_CACHE_MAX_ENTRIES` | Max `/api/v1/info` cache entries (1h TTL) | `20000` |
 
 ## API Documentation
 
@@ -213,6 +220,7 @@ GET /version
 ```
 
 ### 6. Cache Management (New Feature)
+Requires `ADMIN_TOKEN` to be set and the header `Authorization: Bearer <ADMIN_TOKEN>`.
 ```bash
 # Flush cache index
 GET /api/cache/flush

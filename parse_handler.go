@@ -20,14 +20,14 @@ import (
 )
 
 const (
-	defaultParseWorkerBase = "http://xhs-proxy.tzpro.workers.dev"
-	defaultParseVVSecret   = "098070c045665742f76237ba7096131755c5c02942e963e94b9cecbc53152861"
+	defaultParseWorkerBase = "https://xhs-proxy.tzpro.workers.dev"
 	parsePathname          = "/api/parse"
 )
 
 var (
 	parseWorkerBase = getEnvString("PARSE_WORKER_BASE", defaultParseWorkerBase)
-	parseVVSecret   = getEnvString("PARSE_VV_SECRET", defaultParseVVSecret)
+	// 签名密钥只允许从环境变量注入；未配置时 /api/v1/parse 返回 503
+	parseVVSecret   = getEnvString("PARSE_VV_SECRET", "")
 	parseHTTPClient = &http.Client{Timeout: 30 * time.Second}
 	parseNonceChars = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 )
@@ -45,6 +45,11 @@ func parseProxyHandler(c *gin.Context) {
 
 	if !isValidHTTPURL(targetURL) {
 		handleError(c, http.StatusBadRequest, "Invalid url, only http/https is supported")
+		return
+	}
+
+	if parseVVSecret == "" {
+		handleError(c, http.StatusServiceUnavailable, "Parse service is not configured")
 		return
 	}
 
