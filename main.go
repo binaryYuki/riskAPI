@@ -1,18 +1,29 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
+// shutdownTimeout 收到停机信号后等待进行中请求完成的最长时间
+const shutdownTimeout = 15 * time.Second
+
 func main() {
+	// SIGINT / SIGTERM（容器平台停止实例时发送）触发优雅停机
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Set GOMAXPROCS to use all available CPU cores
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	log.Printf("GOMAXPROCS set to %d", runtime.GOMAXPROCS(0))
@@ -70,10 +81,9 @@ func main() {
 	router.Use(SensitivePathMiddleware())
 
 	// Start background services
-	// 必须先初始化 CDN/IDC 缓存 map，再启动会写入这些 map 的同步协程
+	// CDN/IDC 列表随镜像发布、运行期不变，启动时加载一次即可（/api/cache/flush/all 可手动重载）
 	initCDNIDCCache()
-	go updateIPListsPeriodically(config)
-	startCDNListSync()
+	go updateIPListsPeriodically(ctx, config)
 
 	// Setup routes
 	setupRoutes(router)
@@ -98,8 +108,22 @@ func main() {
 
 	log.Printf("Server configured for high concurrency with optimized timeouts and connection limits")
 
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	case <-ctx.Done():
+		log.Printf("Shutdown signal received, draining in-flight requests (timeout %s)...", shutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Graceful shutdown incomplete: %v", err)
+		}
+		log.Printf("Server stopped")
 	}
 }
 
@@ -117,6 +141,7 @@ func setupRoutes(router *gin.Engine) {
 	}
 	router.GET("/api/v1/ip", checkRequestIPHandler)
 	router.GET("/api/status", statusHandler)
+	router.GET("/api/ready", readyHandler)
 
 	router.GET("/api/v1/info", ipInfoHandler)
 	router.GET("/api/v1/parse",

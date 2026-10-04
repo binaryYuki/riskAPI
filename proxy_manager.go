@@ -5,7 +5,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"time"
 )
 
 // initCDNIDCCache initializes CDN and IDC caches
@@ -14,17 +13,6 @@ func initCDNIDCCache() {
 		syncCDNLists()
 		syncIDCLists()
 	})
-}
-
-// startCDNListSync starts CDN list synchronization
-func startCDNListSync() {
-	go func() {
-		for {
-			time.Sleep(24 * time.Hour) // Sync once daily（启动时已由 initCDNIDCCache 加载）
-			syncCDNLists()
-			syncIDCLists()
-		}
-	}()
 }
 
 // syncCDNLists 重新加载 CDN 列表并原子替换查找表
