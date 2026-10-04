@@ -72,7 +72,7 @@ export HONEYTRAP_ENABLED=true
 export HONEYTRAP_DECOYS=true
 
 # 5. 启动服务
-go run .
+go run ./cmd/server
 ```
 
 ### Docker部署
@@ -114,6 +114,10 @@ docker-compose up -d
 | `PARSE_WORKER_BASE` | 上游解析 Worker 地址 | `https://xhs-proxy.tzpro.workers.dev` |
 | `PARSE_RATE_LIMIT_PER_MIN` | `/api/v1/parse` 每个客户端 IP 每分钟请求上限（`0` 不限流） | `30` |
 | `INFO_CACHE_MAX_ENTRIES` | `/api/v1/info` 缓存最大条目数（TTL 1 小时） | `20000` |
+| `LISTEN_ADDR` | 监听地址 | `:8080` |
+| `LOG_FORMAT` | 日志格式：`text` 或 `json` | `text` |
+| `LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
+| `QQWRY_PATH` | 纯真库 `qqwry.dat` 路径 | `providers/qqwry/qqwry.dat` |
 
 ## API文档
 
@@ -214,6 +218,9 @@ GET /api/ready
 # 监控指标
 GET /api/metrics
 
+# Prometheus 文本格式
+GET /metrics
+
 # 纯真数据库状态 (新功能)
 GET /api/qqwry/stats
 
@@ -313,23 +320,21 @@ services:
 
 ### 项目结构
 ```
-├── main.go              # 主程序入口
-├── handlers.go          # HTTP处理程序
-├── info_handler.go      # 地理位置查询处理
-├── middleware.go        # 中间件 (日志、CORS、蜜罐)
-├── honeytrap.go         # 蜜罐防护系统
-├── qqwry.go            # 纯真数据库解析
-├── ip_checker.go        # IP检查逻辑  
-├── types.go            # 数据结构定义
-├── config.go           # 配置管理
-├── providers/          # 地理位置数据源
-│   ├── maxmind/        # MaxMind数据库
-│   ├── qqwry/          # 纯真数据库
-│   ├── ipsb/           # IP.SB API
-│   └── meituan/        # 美团API
-└── data/               # 静态数据文件
-    ├── cdn/            # CDN IP范围
-    └── idc/            # IDC IP范围
+├── cmd/server/          # 程序入口：组装依赖、启动、优雅停机
+├── internal/
+│   ├── config/          # 全部配置（从环境变量加载）
+│   ├── httpapi/         # HTTP 服务：路由、处理函数、中间件、客户端 IP 解析
+│   ├── feeds/           # 风险 IP 数据源：抓取、解析、失败沿用旧数据、就绪状态
+│   ├── ipset/           # 最长前缀匹配 IP 表（bart）、bogon 判断
+│   ├── netlists/        # CDN / IDC（云厂商）网段列表
+│   ├── geo/             # 地理位置聚合（MMDB、纯真、美团、IP.SB）
+│   ├── honeytrap/       # 蜜罐中间件与诱饵路由
+│   └── cache/           # 带 TTL 与容量上限的缓存
+├── providers/           # 地理位置数据库（MMDB、qqwry.dat，CI 每日更新）
+└── data/                # 静态数据
+    ├── cdn/             # CDN IP 范围
+    ├── idc/             # IDC IP 范围
+    └── pages/           # 403 页面
 ```
 
 ### 添加新数据源

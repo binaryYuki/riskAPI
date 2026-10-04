@@ -1,0 +1,190 @@
+package httpapi
+
+import (
+	"crypto/subtle"
+	"log/slog"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+// sensitivePathRegex 敏感文件/目录路径，直接返回 403
+var sensitivePathRegex = regexp.MustCompile(`(?i)^/(\.env|\.git|\.svn|\.hg|\.DS_Store|config\.json|config\.yml|config\.yaml|wp-config\.php|composer\.json|composer\.lock|package\.json|yarn\.lock|docker-compose\.yml|id_rsa|id_rsa\.pub|\.bash_history|\.htaccess|\.htpasswd|\.ssh|\.aws|\.npmrc|\.dockerignore|\.gitignore|\.idea|vendor/.*|node_modules/.*|backup|db\.sqlite|db\.sql|dump\.sql|phpinfo\.php|test\.php|debug\.php|admin|admin\.php|webshell\.php|shell\.php|cmd\.php)$`)
+
+// correlation 为请求分配 correlation ID（优先沿用 X-Correlation-ID），并写入 X-Request-ID 响应头
+func correlation() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.GetHeader("X-Correlation-ID")
+		if id == "" {
+			if v7, err := uuid.NewV7(); err == nil {
+				id = v7.String()
+			} else {
+				id = uuid.New().String() + "vtc" // V7 不可用时回退为随机 UUID
+			}
+		}
+		id = strings.ReplaceAll(id, "-", "")
+		c.Set("correlation_id", id)
+		c.Header("X-Request-ID", id)
+		c.Header("Cache-Control", "private, no-cache, no-store, max-age=0, must-revalidate")
+		c.Next()
+	}
+}
+
+func correlationID(c *gin.Context) string {
+	id, _ := c.Get("correlation_id")
+	s, _ := id.(string)
+	return s
+}
+
+// requestLog 返回携带 correlation_id 的请求级 logger
+func (s *Server) requestLog(c *gin.Context) *slog.Logger {
+	return s.log.With("correlation_id", correlationID(c))
+}
+
+// requestLogger 记录访问日志；/.well-known/ 直接 404 且不记录
+func (s *Server) requestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/.well-known/") {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		start := time.Now()
+		c.Next()
+		s.log.Info("request",
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path,
+			"status", c.Writer.Status(),
+			"latency", time.Since(start),
+			"client_ip", s.clientIP(c),
+			"correlation_id", correlationID(c),
+		)
+	}
+}
+
+// sensitivePath 拦截敏感路径：GET 返回 403 页面，其余方法返回 JSON
+func (s *Server) sensitivePath() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !sensitivePathRegex.MatchString(c.Request.URL.Path) {
+			return
+		}
+		if c.Request.Method == http.MethodGet {
+			c.Header("X-Content-Type-Options", "nosniff")
+			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+			c.Header("Pragma", "no-cache")
+			c.Header("Expires", "0")
+			// 不用 c.File：http.ServeFile 会把已设置的 403 覆盖为 200
+			c.Data(http.StatusForbidden, "text/html; charset=utf-8", s.forbiddenPage)
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		}
+		c.Abort()
+	}
+}
+
+// loadForbiddenPage 读取 403 页面，失败时回退为纯文本
+func loadForbiddenPage(path string, log *slog.Logger) []byte {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Warn("failed to read 403 page", "path", path, "err", err)
+		return []byte("403 Forbidden")
+	}
+	return data
+}
+
+// crossOriginResourcePolicy 允许跨源嵌入资源
+func crossOriginResourcePolicy() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cross-Origin-Resource-Policy", "cross-origin")
+		c.Next()
+	}
+}
+
+// adminAuth 要求 Authorization: Bearer <token>；token 为空时管理接口整体禁用
+func adminAuth(token string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if token == "" {
+			handleError(c, http.StatusForbidden, "admin endpoints are disabled")
+			return
+		}
+		provided, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+			c.Header("WWW-Authenticate", `Bearer realm="admin"`)
+			handleError(c, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		c.Next()
+	}
+}
+
+// ipRateLimiter 按客户端 IP 的固定窗口限流
+type ipRateLimiter struct {
+	mu      sync.Mutex
+	limit   int
+	window  time.Duration
+	clients map[string]*rateWindow
+}
+
+type rateWindow struct {
+	start time.Time
+	count int
+}
+
+func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
+	return &ipRateLimiter{limit: limit, window: window, clients: make(map[string]*rateWindow)}
+}
+
+// allow 返回是否放行以及距窗口重置的剩余时间
+func (l *ipRateLimiter) allow(key string, now time.Time) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	w, ok := l.clients[key]
+	if !ok || now.Sub(w.start) >= l.window {
+		if !ok {
+			l.evictExpired(now)
+		}
+		l.clients[key] = &rateWindow{start: now, count: 1}
+		return true, 0
+	}
+	if w.count >= l.limit {
+		return false, l.window - now.Sub(w.start)
+	}
+	w.count++
+	return true, 0
+}
+
+// evictExpired 在表过大时清理已过期窗口，避免被大量来源地址撑爆内存
+func (l *ipRateLimiter) evictExpired(now time.Time) {
+	if len(l.clients) < 10000 {
+		return
+	}
+	for k, w := range l.clients {
+		if now.Sub(w.start) >= l.window {
+			delete(l.clients, k)
+		}
+	}
+}
+
+// rateLimit 对每个客户端 IP 限制 window 内最多 limit 次请求；limit<=0 表示不限流
+func rateLimit(limit int, window time.Duration, clientIP func(*gin.Context) string) gin.HandlerFunc {
+	if limit <= 0 {
+		return func(c *gin.Context) { c.Next() }
+	}
+	limiter := newIPRateLimiter(limit, window)
+	return func(c *gin.Context) {
+		ok, retryAfter := limiter.allow(clientIP(c), time.Now())
+		if !ok {
+			c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+			handleError(c, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+		c.Next()
+	}
+}
