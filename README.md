@@ -74,7 +74,7 @@ export HONEYTRAP_ENABLED=true
 export HONEYTRAP_DECOYS=true
 
 # 5. Start the service
-go run .
+go run ./cmd/server
 ```
 
 ### Docker Deployment
@@ -116,6 +116,10 @@ docker-compose up -d
 | `PARSE_WORKER_BASE` | Upstream parse worker base URL | `https://xhs-proxy.tzpro.workers.dev` |
 | `PARSE_RATE_LIMIT_PER_MIN` | Per-client-IP limit for `/api/v1/parse` (`0` disables) | `30` |
 | `INFO_CACHE_MAX_ENTRIES` | Max `/api/v1/info` cache entries (1h TTL) | `20000` |
+| `LISTEN_ADDR` | Listen address | `:8080` |
+| `LOG_FORMAT` | Log format: `text` or `json` | `text` |
+| `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
+| `QQWRY_PATH` | Path to `qqwry.dat` | `providers/qqwry/qqwry.dat` |
 
 ## API Documentation
 
@@ -216,6 +220,9 @@ GET /api/ready
 # Monitoring metrics
 GET /api/metrics
 
+# Prometheus text format
+GET /metrics
+
 # QQWry database status (New Feature)
 GET /api/qqwry/stats
 
@@ -315,23 +322,21 @@ services:
 
 ### Project Structure
 ```
-├── main.go              # Main program entry
-├── handlers.go          # HTTP handlers
-├── info_handler.go      # Geolocation query handler
-├── middleware.go        # Middleware (logging, CORS, honeypot)
-├── honeytrap.go         # Honeypot protection system
-├── qqwry.go            # QQWry database parser
-├── ip_checker.go        # IP checking logic
-├── types.go            # Data structure definitions
-├── config.go           # Configuration management
-├── providers/          # Geolocation data sources
-│   ├── maxmind/        # MaxMind database
-│   ├── qqwry/          # QQWry database
-│   ├── ipsb/           # IP.SB API
-│   └── meituan/        # Meituan API
-└── data/               # Static data files
-    ├── cdn/            # CDN IP ranges
-    └── idc/            # IDC IP ranges
+├── cmd/server/          # Entry point: wiring, startup, graceful shutdown
+├── internal/
+│   ├── config/          # All configuration, loaded from environment variables
+│   ├── httpapi/         # HTTP server: routes, handlers, middleware, client IP resolution
+│   ├── feeds/           # Risk IP feeds: fetching, parsing, last-good fallback, readiness
+│   ├── ipset/           # Longest-prefix-match IP table (bart), bogon checks
+│   ├── netlists/        # CDN / IDC (cloud provider) lists
+│   ├── geo/             # Geolocation aggregation (MMDB, QQWry, Meituan, IP.SB)
+│   ├── honeytrap/       # Honeypot middleware and decoy routes
+│   └── cache/           # TTL + size-bounded cache
+├── providers/           # Geolocation databases (MMDB, qqwry.dat; updated daily by CI)
+└── data/                # Static data
+    ├── cdn/             # CDN IP ranges
+    ├── idc/             # IDC IP ranges
+    └── pages/           # 403 page
 ```
 
 ### Adding New Data Sources
