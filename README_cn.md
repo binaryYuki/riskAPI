@@ -62,9 +62,10 @@ cd riskAPI
 # 2. 安装依赖
 go mod tidy
 
-# 3. 下载地理位置数据库 (可选)
-# MaxMind数据库需要注册账号下载
-# 纯真数据库会自动下载
+# 3. 下载地理位置数据库（不入 git）
+# 先从 GitHub Release `geo-data` 取最近一次成功版本（需 `gh auth login`），再从源头更新；
+# MaxMind / IPinfo 仅在设置了对应 token 时更新
+./scripts/fetch-geo-data.sh
 
 # 4. 配置环境变量 (可选)
 export ALLOWED_CORS="yourdomain.com,anotherdomain.com"
@@ -78,6 +79,7 @@ go run ./cmd/server
 ### Docker部署
 ```bash
 # 构建镜像
+./scripts/fetch-geo-data.sh   # 构建镜像前需准备好 providers/ 下的数据库
 docker build -t riskapi .
 
 # 运行容器

@@ -64,9 +64,10 @@ cd riskAPI
 # 2. Install dependencies
 go mod tidy
 
-# 3. Download geolocation databases (optional)
-# MaxMind databases require account registration
-# QQWry database downloads automatically
+# 3. Download geolocation databases (not stored in git)
+# Pulls the last known good set from the `geo-data` GitHub Release (needs `gh auth login`),
+# then refreshes from upstream; MaxMind / IPinfo refresh only when their tokens are set
+./scripts/fetch-geo-data.sh
 
 # 4. Configure environment variables (optional)
 export ALLOWED_CORS="yourdomain.com,anotherdomain.com"
@@ -80,6 +81,7 @@ go run ./cmd/server
 ### Docker Deployment
 ```bash
 # Build image
+./scripts/fetch-geo-data.sh   # the image build expects databases in providers/
 docker build -t riskapi .
 
 # Run container
