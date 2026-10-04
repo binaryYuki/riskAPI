@@ -42,7 +42,7 @@ A high-performance Go-based service providing comprehensive IP risk detection, g
 - **Memory Optimization**: Efficient memory usage for large-scale IP lists
 
 ## Tech Stack
-- **Language**: Go 1.21+
+- **Language**: Go 1.26+
 - **Framework**: Gin Web Framework
 - **Cache**: Radix Tree (prefix-matching cache)
 - **Databases**: MaxMind MMDB, QQWry IP Database
@@ -51,7 +51,7 @@ A high-performance Go-based service providing comprehensive IP risk detection, g
 ## Quick Start
 
 ### Requirements
-- Go 1.21+
+- Go 1.26+
 - Docker (optional)
 - 8GB+ RAM (recommended for large-scale IP list caching)
 
