@@ -209,6 +209,10 @@ GET /cdn/all
 # Service status
 GET /api/status
 
+# Readiness: 503 until risk IP lists finish their first load, then 200.
+# Use this as the platform HTTP health check so new instances do not take traffic with empty lists.
+GET /api/ready
+
 # Monitoring metrics
 GET /api/metrics
 
