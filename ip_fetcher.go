@@ -177,43 +177,22 @@ func parseTextResponse(resp *http.Response, sourceID string, ipAssociationChan c
 	}
 }
 
-// processIPAssociations processes collected IP associations and updates data structures
+// processIPAssociations 由抓取结果构建新的风险查找表并整体替换
+// 同一条目出现在多个来源时，后到的来源覆盖先到的
 func processIPAssociations(ipAssociations []IPAssociation) {
-	newSingleIPs := make(map[string]bool)
-	var newCIDRInfo []CIDRInfo
-	newReasonMap := make(map[string]string)
-
+	newSet := newPrefixSet()
+	singleIPs, cidrs := 0, 0
 	for _, association := range ipAssociations {
-		entry := association.Entry
-		reason := association.Reason
-
-		if _, ipNet, err := net.ParseCIDR(entry); err == nil {
-			newCIDRInfo = append(newCIDRInfo, CIDRInfo{Net: ipNet, OriginalCIDR: entry})
-			newReasonMap[entry] = reason
+		if !newSet.insert(association.Entry, association.Reason) {
 			continue
 		}
-		if net.ParseIP(entry) != nil { // single IP (v4 or v6)
-			newSingleIPs[entry] = true
-			newReasonMap[entry] = reason
+		if strings.Contains(association.Entry, "/") {
+			cidrs++
+		} else {
+			singleIPs++
 		}
 	}
+	storeRiskySet(newSet)
 
-	// Update global data structures
-	riskyDataMutex.Lock()
-	_ = newSingleIPs
-	riskyCIDRInfo = newCIDRInfo
-	reasonMap = newReasonMap
-	riskyDataMutex.Unlock()
-
-	// Update cache
-	cacheData := IPCacheData{
-		Timestamp: time.Now().Unix(),
-		Entries:   make([]string, 0, len(ipAssociations)),
-	}
-	for _, association := range ipAssociations {
-		cacheData.Entries = append(cacheData.Entries, association.Entry)
-	}
-	appCache.Set(ipCacheKey, cacheData)
-
-	fmt.Printf("Updated IP lists: %d single IPs, %d CIDR ranges\n", len(newSingleIPs), len(newCIDRInfo))
+	fmt.Printf("Updated IP lists: %d single IPs, %d CIDR ranges (%d unique prefixes)\n", singleIPs, cidrs, newSet.size())
 }
