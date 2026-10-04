@@ -34,7 +34,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build-and-push:
+  build:
+    # PR 与非 master 分支只构建验证；master 上额外推送镜像、更新 Release 并部署
+    name: ${{ (github.event_name != 'pull_request' && github.ref == 'refs/heads/master') && 'build & deploy' || 'build (no push)' }}
     runs-on: ubuntu-latest
     env:
       # 仅 master 上的 push / schedule / 手动运行才推送镜像、更新 Release、部署
@@ -85,7 +87,7 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       # 构建多架构镜像；仅 master 推送
-      - name: Build and push multi-arch Docker image
+      - name: Build multi-arch Docker image (push on master only)
         uses: docker/build-push-action@v7
         with:
           context: .
