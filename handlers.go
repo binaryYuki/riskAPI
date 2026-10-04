@@ -289,19 +289,8 @@ func flushCacheHandler(c *gin.Context) {
 			appCache.Flush()
 		}
 		// 清空风险数据
-		riskyDataMutex.Lock()
-		riskyCIDRInfo = nil
-		reasonMap = make(map[string]string)
-		riskyDataMutex.Unlock()
-		// 清空 CDN/IDC 缓存
-		cdnIdcMutex.Lock()
-		cdnIPCache = make(map[string][]CIDRInfo)
-		idcIPCache = make(map[string][]CIDRInfo)
-		cdnSingleIPs = make(map[string]map[string]bool)
-		idcSingleIPs = make(map[string]map[string]bool)
-		cdnIdcMutex.Unlock()
-
-		// 立即重新加载 CDN & IDC 列表，避免等待下一次定时同步
+		storeRiskySet(newPrefixSet())
+		// 立即重新加载 CDN & IDC 列表（构建新表后原子替换），避免等待下一次定时同步
 		syncCDNLists()
 		syncIDCLists()
 
@@ -332,10 +321,7 @@ func flushCacheHandler(c *gin.Context) {
 
 	case "risk":
 		if rng == "all" {
-			riskyDataMutex.Lock()
-			riskyCIDRInfo = nil
-			reasonMap = make(map[string]string)
-			riskyDataMutex.Unlock()
+			storeRiskySet(newPrefixSet())
 			result["flushed_risk_all"] = true
 		} else {
 			if decoded, err := url.PathUnescape(rng); err == nil {
@@ -364,27 +350,17 @@ func flushCacheIndexHandler(c *gin.Context) {
 	}})
 }
 
-// removeRiskEntry 删除单个风险 IP 或 CIDR, 返回是否删除成功
+// removeRiskEntry 删除单个风险 IP 或 CIDR（写时复制后整体替换）, 返回是否删除成功
 func removeRiskEntry(entry string) bool {
-	removed := false
-	riskyDataMutex.Lock()
-	defer riskyDataMutex.Unlock()
-
-	if _, ok := reasonMap[entry]; ok {
-		delete(reasonMap, entry)
-		removed = true
+	riskyWriteMu.Lock()
+	defer riskyWriteMu.Unlock()
+	current := riskySet.Load()
+	if current == nil {
+		return false
 	}
-
-	if strings.Contains(entry, "/") {
-		var newList []CIDRInfo
-		for _, ci := range riskyCIDRInfo {
-			if ci.OriginalCIDR == entry {
-				removed = true
-				continue
-			}
-			newList = append(newList, ci)
-		}
-		riskyCIDRInfo = newList
+	next, removed := current.without(entry)
+	if removed {
+		riskySet.Store(next)
 	}
 	return removed
 }
@@ -401,17 +377,17 @@ func qqwryStatsHandler(c *gin.Context) {
 // exportCIDRsHandler 导出所有风险 CIDR 为文本，并注释来源
 func exportCIDRsHandler(c *gin.Context) {
 	// 收集并格式化所有 CIDR
+	// 快照无锁遍历；单个 IP（/32、/128）不属于 CIDR，不导出
 	var lines []string
-	// 加锁读取
-	riskyDataMutex.RLock()
-	for _, ci := range riskyCIDRInfo {
-		src := reasonMap[ci.OriginalCIDR]
+	for pfx, src := range riskySet.Load().all() {
+		if pfx.IsSingleIP() {
+			continue
+		}
 		if strings.TrimSpace(src) == "" {
 			src = "unknown"
 		}
-		lines = append(lines, ci.OriginalCIDR+" # "+src)
+		lines = append(lines, pfx.String()+" # "+src)
 	}
-	riskyDataMutex.RUnlock()
 
 	// 排序稳定输出
 	if len(lines) == 0 {

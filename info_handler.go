@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"sync"
 
 	"risky_ip_filter/providers/ipsb"
 	"risky_ip_filter/providers/meituan"
@@ -48,46 +50,18 @@ func ipInfoHandler(c *gin.Context) {
 	// 缓存未命中
 	c.Header("X-Catyuki-Cache", "MISS")
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), infoLookupTimeout)
-	defer cancel()
-
-	type providerDef struct {
-		name       string
-		countryDBs []string
-		asnDBs     []string
-	}
-	providers := []providerDef{
-		{"ipinfo", []string{"providers/ipinfo/ipinfo-country.mmdb"}, []string{"providers/ipinfo/ipinfo-asn.mmdb"}},
-		{"iplocate", []string{"providers/iplocate/iplocate-country.mmdb"}, []string{"providers/iplocate/iplocate-asn.mmdb"}},
-		{"maxmind", []string{"providers/maxmind/GeoLite2-Country.mmdb"}, []string{"providers/maxmind/GeoLite2-ASN.mmdb"}},
-	}
-
 	ip := net.ParseIP(ipStr)
 	results := make(map[string]interface{})
 
-	for _, p := range providers {
-		select {
-		case <-ctx.Done():
-			// 超时则停止后续 provider
-			log.Printf("[info] provider_loop_timeout ip=%s provider=%s correlation_id=%v", ipStr, p.name, getCorrelationID(c))
-			goto RESPONSE
-		default:
-		}
+	// 本地 MMDB 查询（reader 常驻内存，单次仅需微秒级，无需并发或超时控制）
+	for _, p := range mmdbProviders {
 		// 将同一 provider 的多个 MMDB 结果合并为一个 map
 		providerData := make(map[string]interface{})
-		for _, dbPath := range append(append([]string{}, p.countryDBs...), p.asnDBs...) {
-			if !statOk(dbPath) {
-				continue
-			}
-			select { // 每个 DB 单独检查超时
-			case <-ctx.Done():
-				log.Printf("[info] provider_db_timeout ip=%s provider=%s db=%s correlation_id=%v", ipStr, p.name, dbPath, getCorrelationID(c))
-				goto RESPONSE
-			default:
-			}
-			if data, err := lookupGeneric(dbPath, ip); err == nil {
+		for _, dbPath := range p.dbs {
+			data, err := lookupGeneric(dbPath, ip)
+			if err == nil {
 				mergeGeneric(providerData, data)
-			} else {
+			} else if !errors.Is(err, errMMDBUnavailable) {
 				log.Printf("[error] provider_mmdb_lookup_fail ip=%s provider=%s db=%s err=%v correlation_id=%v", ipStr, p.name, dbPath, err, getCorrelationID(c))
 			}
 		}
@@ -108,12 +82,18 @@ func ipInfoHandler(c *gin.Context) {
 		log.Printf("[error] provider_qqwry_fail ip=%s err=%v correlation_id=%v", ipStr, err, getCorrelationID(c))
 	}
 
+	// 外部 API 调用失败（含超时）时结果不完整，只做短时缓存以便尽快重试
+	cacheTTL := infoCacheExpiry
+	ctx, cancel := context.WithTimeout(c.Request.Context(), infoLookupTimeout)
+	defer cancel()
+
 	// 仅当其它 provider 判定为中国(CN) 且 IP 适合时再调用美团 API；否则(非中国)调用 ip.sb
 	if isChina(results) {
 		if meituan.Suitable(ipStr) {
 			if mtData, err := meituan.Query(ctx, ipStr, nil, meituan.QueryOptions{Enhanced: true}); err == nil && len(mtData) > 0 {
 				results["meituan"] = mtData
 			} else if err != nil {
+				cacheTTL = infoPartialCacheExpiry
 				log.Printf("[error] provider_meituan_fail ip=%s err=%v correlation_id=%v", ipStr, err, getCorrelationID(c))
 			}
 		} else {
@@ -123,13 +103,13 @@ func ipInfoHandler(c *gin.Context) {
 		if ipsbData, err := ipsb.Query(ctx, ipStr, nil); err == nil && len(ipsbData) > 0 {
 			results["ipsb"] = ipsbData
 		} else if err != nil {
+			cacheTTL = infoPartialCacheExpiry
 			log.Printf("[error] provider_ipsb_fail ip=%s err=%v correlation_id=%v", ipStr, err, getCorrelationID(c))
 		}
 	}
 
-RESPONSE:
 	resp := InfoResponse{Status: "ok", IP: ipStr, Results: results}
-	appCache.Set(cacheKey, resp)
+	appCache.SetWithTTL(cacheKey, resp, cacheTTL)
 	c.IndentedJSON(http.StatusOK, resp)
 }
 
@@ -158,13 +138,47 @@ func isChina(results map[string]interface{}) bool {
 	return false
 }
 
-// lookupGeneric 以通用结构解析 MMDB (不定义固定 struct) 返回 map / slice / 基本类型构成的结构
-func lookupGeneric(dbPath string, ip net.IP) (interface{}, error) {
+// mmdbProviders 各 provider 的 MMDB 文件（country 在前、asn 在后，合并时后者覆盖同名字段）
+var mmdbProviders = []struct {
+	name string
+	dbs  []string
+}{
+	{"ipinfo", []string{"providers/ipinfo/ipinfo-country.mmdb", "providers/ipinfo/ipinfo-asn.mmdb"}},
+	{"iplocate", []string{"providers/iplocate/iplocate-country.mmdb", "providers/iplocate/iplocate-asn.mmdb"}},
+	{"maxmind", []string{"providers/maxmind/GeoLite2-Country.mmdb", "providers/maxmind/GeoLite2-ASN.mmdb"}},
+}
+
+// errMMDBUnavailable 表示 MMDB 文件不存在或为空（未下载），调用方静默跳过
+var errMMDBUnavailable = errors.New("mmdb file unavailable")
+
+// mmdbReaders 缓存已打开的 reader（path → *maxminddb.Reader）。
+// MMDB 随镜像发布、更新依赖重新部署，因此 reader 在进程生命周期内常驻，不关闭。
+var mmdbReaders sync.Map
+
+func mmdbReader(dbPath string) (*maxminddb.Reader, error) {
+	if r, ok := mmdbReaders.Load(dbPath); ok {
+		return r.(*maxminddb.Reader), nil
+	}
+	if !statOk(dbPath) {
+		return nil, errMMDBUnavailable
+	}
 	reader, err := maxminddb.Open(dbPath)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = reader.Close() }()
+	if actual, loaded := mmdbReaders.LoadOrStore(dbPath, reader); loaded {
+		_ = reader.Close() // 并发首次打开时只保留一个
+		return actual.(*maxminddb.Reader), nil
+	}
+	return reader, nil
+}
+
+// lookupGeneric 以通用结构解析 MMDB (不定义固定 struct) 返回 map / slice / 基本类型构成的结构
+func lookupGeneric(dbPath string, ip net.IP) (interface{}, error) {
+	reader, err := mmdbReader(dbPath)
+	if err != nil {
+		return nil, err
+	}
 	var v interface{}
 	if err := reader.Lookup(ip, &v); err != nil {
 		return nil, err

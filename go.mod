@@ -12,6 +12,7 @@ require (
 
 require (
 	github.com/armon/go-radix v1.0.0
+	github.com/gaissmai/bart v0.30.0
 	golang.org/x/text v0.38.1-0.20260615170127-0dc94a239c8b
 )
 

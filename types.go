@@ -2,18 +2,11 @@ package main
 
 import (
 	"encoding/xml"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/armon/go-radix"
 )
-
-// CIDRInfo stores a parsed CIDR network and its original string representation
-type CIDRInfo struct {
-	Net          *net.IPNet
-	OriginalCIDR string
-}
 
 // IPAssociation is used to pass IP/CIDR entries and their reasons from fetchers
 type IPAssociation struct {
@@ -38,12 +31,6 @@ type WelcomeJson struct {
 type Proxy struct {
 	Name   string `json:"name"`
 	Server string `json:"server"`
-}
-
-// IPCacheData represents the cached IP data structure
-type IPCacheData struct {
-	Timestamp int64    `json:"timestamp"`
-	Entries   []string `json:"entries"`
 }
 
 // RSSFeed is a struct for parsing Project Honeypot RSS data
@@ -116,16 +103,22 @@ func (e cacheEntry) expired(now time.Time) bool {
 }
 
 func (rc *RadixCache) Set(key string, value interface{}, _ ...interface{}) {
+	rc.SetWithTTL(key, value, rc.ttl)
+}
+
+// SetWithTTL 以指定 TTL 写入（ttl<=0 表示永不过期）。
+// TTL 不同的条目共用写入顺序队列：淘汰仍按写入顺序进行，过期条目在 Get 时惰性删除，容量上限始终有效。
+func (rc *RadixCache) SetWithTTL(key string, value interface{}, ttl time.Duration) {
 	rc.mutex.Lock()
 	defer rc.mutex.Unlock()
 
 	now := time.Now()
 	var expiresAt time.Time
-	if rc.ttl > 0 {
-		expiresAt = now.Add(rc.ttl)
+	if ttl > 0 {
+		expiresAt = now.Add(ttl)
 	}
 	rc.tree.Insert(key, cacheEntry{value: value, expiresAt: expiresAt})
-	if rc.maxEntries <= 0 && rc.ttl <= 0 {
+	if rc.maxEntries <= 0 && ttl <= 0 {
 		return
 	}
 	rc.order = append(rc.order, cacheOrderItem{key: key, expiresAt: expiresAt})
@@ -203,17 +196,7 @@ func (rc *RadixCache) Items() map[string]interface{} {
 }
 
 var (
-	_              map[string]bool   // Stores single IPs for quick lookup
-	riskyCIDRInfo  []CIDRInfo        // Stores parsed CIDR info
-	reasonMap      map[string]string // Stores reasons for IPs/CIDRs
-	riskyDataMutex sync.RWMutex      // Protects riskySingleIPs, riskyCIDRInfo, and reasonMap
-
 	appCache *RadixCache
 
-	cdnIPCache    map[string][]CIDRInfo      // CDN IP 缓存 (edgeone, cloudflare, fastly)
-	idcIPCache    map[string][]CIDRInfo      // IDC IP 缓存 (aws, azure, gcp, etc.)
-	cdnSingleIPs  map[string]map[string]bool // CDN 单个 IP 缓存
-	idcSingleIPs  map[string]map[string]bool // IDC 单个 IP 缓存
-	cdnIdcMutex   sync.RWMutex               // 保护 CDN/IDC 缓存的读写锁
-	cacheInitOnce sync.Once                  // 确保缓存只初始化一次
+	cacheInitOnce sync.Once // 确保 CDN/IDC 列表只在启动时初始化一次
 )

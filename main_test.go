@@ -23,8 +23,16 @@ import (
 // 测试辅助函数：重置全局状态
 func resetTestGlobals() {
 	appCache = NewRadixCache()
-	reasonMap = make(map[string]string)
-	riskyCIDRInfo = nil
+	storeRiskySet(newPrefixSet())
+}
+
+// setRiskyEntries 用给定的 条目→原因 替换风险表
+func setRiskyEntries(entries map[string]string) {
+	s := newPrefixSet()
+	for entry, reason := range entries {
+		s.insert(entry, reason)
+	}
+	storeRiskySet(s)
 }
 
 func TestHandleError(t *testing.T) {
@@ -70,8 +78,7 @@ func TestCheckRequestIPHandler(t *testing.T) {
 			wantCode:   http.StatusOK,
 			wantBody:   `{"status":"banned","message":"Test reason","ip":"8.8.8.8"}`,
 			setup: func() {
-				_ = map[string]bool{"8.8.8.8": true}
-				reasonMap = map[string]string{"8.8.8.8": "Test reason"}
+				setRiskyEntries(map[string]string{"8.8.8.8": "Test reason"})
 			},
 		},
 		{
@@ -137,12 +144,7 @@ func TestCorrelationMiddleware(t *testing.T) {
 func TestRiskyIPChannels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	// edgeone
-	riskyCIDRInfo = []CIDRInfo{}
-	_ = map[string]bool{}
-	reasonMap = map[string]string{}
-	_, edgeoneNet, _ := net.ParseCIDR("1.71.146.0/23")
-	riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: edgeoneNet, OriginalCIDR: "1.71.146.0/23"})
-	reasonMap["1.71.146.0/23"] = "edgeone"
+	setRiskyEntries(map[string]string{"1.71.146.0/23": "edgeone"})
 
 	router := gin.Default()
 	router.GET("/api/v1/ip", checkRequestIPHandler)
@@ -153,12 +155,7 @@ func TestRiskyIPChannels(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "edgeone")
 
 	// fastly
-	riskyCIDRInfo = []CIDRInfo{}
-	_ = map[string]bool{}
-	reasonMap = map[string]string{}
-	_, fastlyNet, _ := net.ParseCIDR("23.235.32.0/20")
-	riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: fastlyNet, OriginalCIDR: "23.235.32.0/20"})
-	reasonMap["23.235.32.0/20"] = "fastly"
+	setRiskyEntries(map[string]string{"23.235.32.0/20": "fastly"})
 
 	w2 := httptest.NewRecorder()
 	req2, _ := http.NewRequest(http.MethodGet, "/api/v1/ip", nil)
@@ -230,12 +227,7 @@ func TestAllRiskyChannelsAuto(t *testing.T) {
 		parts := strings.Split(file, string(os.PathSeparator))
 		channel := strings.TrimSuffix(parts[len(parts)-1], ".txt")
 		t.Run(channel, func(t *testing.T) {
-			riskyCIDRInfo = []CIDRInfo{}
-			_ = map[string]bool{}
-			reasonMap = map[string]string{}
-			_, netObj, _ := net.ParseCIDR(cidr)
-			riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: netObj, OriginalCIDR: cidr})
-			reasonMap[cidr] = channel
+			setRiskyEntries(map[string]string{cidr: channel})
 			router := gin.Default()
 			router.GET("/api/v1/ip", checkRequestIPHandler)
 			w := httptest.NewRecorder()
@@ -331,10 +323,7 @@ func setupTestRouter() *gin.Engine {
 }
 
 func resetRiskData() {
-	riskyDataMutex.Lock()
-	riskyCIDRInfo = nil
-	reasonMap = make(map[string]string)
-	riskyDataMutex.Unlock()
+	storeRiskySet(newPrefixSet())
 }
 
 // 动态读取 CDN provider 首个 /24 CIDR
@@ -430,10 +419,7 @@ func TestPriority_RiskyOverridesCDN(t *testing.T) {
 	if err != nil {
 		t.Skip("no /24 edgeone")
 	}
-	riskyDataMutex.Lock()
-	riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: cidrNet, OriginalCIDR: cidrStr})
-	reasonMap[cidrStr] = "test-risk"
-	riskyDataMutex.Unlock()
+	setRiskyEntries(map[string]string{cidrStr: "test-risk"})
 	r := setupTestRouter()
 	probe := ipAdd(cidrNet.IP, 5).String()
 	w := httptest.NewRecorder()
@@ -447,11 +433,7 @@ func TestPriority_RiskyOverridesCDN(t *testing.T) {
 // 私网优先级高于风险
 func TestPriority_PrivateOverridesRisky(t *testing.T) {
 	resetRiskData()
-	_, netObj, _ := net.ParseCIDR("10.0.0.0/8")
-	riskyDataMutex.Lock()
-	riskyCIDRInfo = append(riskyCIDRInfo, CIDRInfo{Net: netObj, OriginalCIDR: "10.0.0.0/8"})
-	reasonMap["10.0.0.0/8"] = "should-not-show"
-	riskyDataMutex.Unlock()
+	setRiskyEntries(map[string]string{"10.0.0.0/8": "should-not-show"})
 	r := setupTestRouter()
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/ip/10.1.2.3", nil)
@@ -464,9 +446,7 @@ func TestPriority_PrivateOverridesRisky(t *testing.T) {
 // 单个风险 IP
 func TestSingleRiskyIP(t *testing.T) {
 	resetRiskData()
-	riskyDataMutex.Lock()
-	reasonMap["9.9.9.9"] = "single-test"
-	riskyDataMutex.Unlock()
+	setRiskyEntries(map[string]string{"9.9.9.9": "single-test"})
 	r := setupTestRouter()
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/ip/9.9.9.9", nil)
@@ -479,11 +459,7 @@ func TestSingleRiskyIP(t *testing.T) {
 // 风险列表 flush 单条与全部
 func TestFlushRiskSingleAndAll(t *testing.T) {
 	resetRiskData()
-	riskyDataMutex.Lock()
-	reasonMap["203.0.114.0/24"] = "risk-block" // 使用非 bogon 段
-	_, n, _ := net.ParseCIDR("203.0.114.0/24")
-	riskyCIDRInfo = []CIDRInfo{{Net: n, OriginalCIDR: "203.0.114.0/24"}}
-	riskyDataMutex.Unlock()
+	setRiskyEntries(map[string]string{"203.0.114.0/24": "risk-block"}) // 使用非 bogon 段
 	r := setupTestRouter()
 
 	// 命中 risky
@@ -524,11 +500,7 @@ func TestFlushRiskSingleAndAll(t *testing.T) {
 	}
 
 	// 重新添加并 flush all
-	resetRiskData()
-	riskyDataMutex.Lock()
-	reasonMap["203.0.114.0/24"] = "risk-block"
-	riskyCIDRInfo = []CIDRInfo{{Net: n, OriginalCIDR: "203.0.114.0/24"}}
-	riskyDataMutex.Unlock()
+	setRiskyEntries(map[string]string{"203.0.114.0/24": "risk-block"})
 	w4 := httptest.NewRecorder()
 	req4, _ := http.NewRequest(http.MethodPost, "/api/cache/flush/risk/all", nil)
 	r.ServeHTTP(w4, req4)
@@ -633,7 +605,7 @@ func TestCheckIPHandlerCases(t *testing.T) {
 		{"203.0.113.1", http.StatusOK, "ok"},
 	}
 	// 设置风险 IP
-	reasonMap["8.8.8.8"] = "Test reason"
+	setRiskyEntries(map[string]string{"8.8.8.8": "Test reason"})
 	for _, c := range cases {
 		w := httptest.NewRecorder()
 		req, _ := http.NewRequest(http.MethodGet, "/api/v1/ip/"+c.ip, nil)
