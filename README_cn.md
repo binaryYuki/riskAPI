@@ -207,6 +207,10 @@ GET /cdn/all
 # 服务状态
 GET /api/status
 
+# 就绪检查：风险 IP 列表首轮加载完成前返回 503，之后返回 200。
+# 建议配置为平台的 HTTP 健康检查路径，避免新实例在数据为空时接流量。
+GET /api/ready
+
 # 监控指标
 GET /api/metrics
 

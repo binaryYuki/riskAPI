@@ -169,6 +169,26 @@ func statusHandler(c *gin.Context) {
 	})
 }
 
+// readyHandler 就绪检查：风险 IP 列表首轮加载完成前返回 503，
+// 供平台健康检查使用，避免新实例在数据为空时接流量（期间所有 IP 都会被判为 ok）
+func readyHandler(c *gin.Context) {
+	if !riskDataReady.Load() {
+		c.IndentedJSON(http.StatusServiceUnavailable, Response{
+			Status:  "loading",
+			Message: "risk IP lists are not loaded yet",
+		})
+		return
+	}
+	c.IndentedJSON(http.StatusOK, Response{
+		Status: "ok",
+		Message: gin.H{
+			"risk_prefixes": riskySet.Load().size(),
+			"cdn_prefixes":  cdnSet.Load().size(),
+			"idc_prefixes":  idcSet.Load().size(),
+		},
+	})
+}
+
 // cdnHandler handles CDN list requests
 func cdnHandler(c *gin.Context) {
 	name := c.Param("name")
@@ -178,7 +198,7 @@ func cdnHandler(c *gin.Context) {
 		return
 	}
 
-	filePath := "data/" + name + ".txt"
+	filePath := "data/cdn/" + name + ".txt"
 	file, err := os.Open(filePath)
 	if err != nil {
 		handleError(c, http.StatusInternalServerError, "File open error")
@@ -214,7 +234,7 @@ func cdnAllHandler(c *gin.Context) {
 
 	for _, p := range providers {
 		result = append(result, p.label)
-		filePath := "data/" + p.name + ".txt"
+		filePath := "data/cdn/" + p.name + ".txt"
 		data, err := os.ReadFile(filePath)
 		if err == nil {
 			lines := strings.Split(string(data), "\n")
