@@ -10,6 +10,15 @@ on:
       - '!README_cn.md'
       - '!docs/**'
       - '!.github/**'
+  # PR 上只做构建与检查（测试、govulncheck、镜像构建），不推送镜像、不部署、不更新 Release；
+  # 不排除 .github/**，修改 workflow 的 PR 同样需要验证
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - 'README.md'
+      - 'README_cn.md'
+      - 'docs/**'
   # 每日下载最新地理位置数据库、构建镜像并重新部署（取代原 auto-update 提交 mmdb 的流程）
   schedule:
     - cron: "0 3 * * *"
@@ -21,13 +30,15 @@ permissions:
 
 concurrency:
   group: docker-release-${{ github.ref }}
-  cancel-in-progress: false
+  # PR 有新提交时取消旧的检查；master 上的部署不中断
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     env:
-      DEPLOY: ${{ github.ref == 'refs/heads/master' }}
+      # 仅 master 上的 push / schedule / 手动运行才推送镜像、更新 Release、部署
+      DEPLOY: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
 
     steps:
       - name: Checkout code
