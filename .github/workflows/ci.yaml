@@ -7,40 +7,52 @@ on:
     paths:
       - '**'
       - '!README.md'
+      - '!README_cn.md'
       - '!docs/**'
       - '!.github/**'
-  workflow_run:
-    workflows: [ "Update MMDB Databases" ]
-    types:
-      - completed
-    branches:
-      - master
+  # 每日下载最新地理位置数据库、构建镜像并重新部署（取代原 auto-update 提交 mmdb 的流程）
+  schedule:
+    - cron: "0 3 * * *"
+  # 在非 master 分支手动运行时只构建验证，不推送镜像、不部署、不更新 Release
   workflow_dispatch:
+
+permissions:
+  contents: write # 更新 geo-data Release
+
+concurrency:
+  group: docker-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    env:
+      DEPLOY: ${{ github.ref == 'refs/heads/master' }}
 
     steps:
-      # 检出代码
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # 安装 Go
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod # 版本以 go.mod 的 go 指令为准（需与 Dockerfile GO_VERSION 一致）
 
-      # 下载依赖
+      # 地理位置数据库不入 git：先取 geo-data Release 的最近成功版本兜底，再从源头更新
+      - name: Fetch geo databases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAXMIND_ACCOUNT_ID: ${{ secrets.MAXMIND_ACCOUNT_ID }}
+          MAXMIND_LICENSE_KEY: ${{ secrets.MAXMIND_LICENSE_KEY }}
+          IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
+        run: ./scripts/fetch-geo-data.sh
+
       - name: Download Go modules
         run: go mod download
 
-      # 编译 Go 程序
       - name: Build Go project
         run: go build -v ./...
 
-      # 运行测试（开启竞态检测）
       - name: Run Go tests
         run: go test -race -v ./...
 
@@ -48,42 +60,51 @@ jobs:
       - name: Run govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
-      # 设置 QEMU
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      # 设置 Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 登录 Docker Hub
       - name: Log in to Docker Hub
-        uses: docker/login-action@v2
+        if: env.DEPLOY == 'true'
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # 构建并推送多架构 Docker 镜像
+      # 构建多架构镜像；仅 master 推送
       - name: Build and push multi-arch Docker image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ env.DEPLOY == 'true' }}
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/risk-api:${{ github.run_id }}
             ${{ secrets.DOCKER_USERNAME }}/risk-api:latest
 
-      - name: Wait for registry propagation
-        run: sleep 3
-
-      # Service Redeploy
-      - name: Redeploy Koyeb service
+      # 镜像推送成功后，把本次使用的数据库保存为新的“最近成功版本”
+      - name: Update geo-data release
+        if: env.DEPLOY == 'true'
         env:
-          KOYEB_API_TOKEN: ${{ secrets.KOYEB_API_TOKEN }}   # 在 Repo Secrets 里设置
-          KOYEB_SERVICE_ID: ${{ secrets.KOYEB_SERVICE_ID }} # 在 Koyeb 控台或 API 获取
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          stage="$(mktemp -d)"
+          find providers -type f \( -name '*.mmdb' -o -name 'qqwry.dat' \) -exec cp {} "$stage/" \;
+          cd "$stage"
+          sha256sum ./*.mmdb qqwry.dat > SHA256SUMS
+          gh release upload geo-data ./* --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Redeploy Koyeb service
+        if: env.DEPLOY == 'true'
+        env:
+          KOYEB_API_TOKEN: ${{ secrets.KOYEB_API_TOKEN }}
+          KOYEB_SERVICE_ID: ${{ secrets.KOYEB_SERVICE_ID }}
+        run: |
+          set -euo pipefail
+          sleep 3 # 等待镜像仓库同步
           echo "Triggering redeploy for service ${KOYEB_SERVICE_ID: -4}..."
           HTTP_CODE=$(curl -sS -X POST \
             -H "Authorization: Bearer ${KOYEB_API_TOKEN}" \
@@ -99,4 +120,3 @@ jobs:
             exit 1
           fi
           echo "Redeploy triggered successfully."
-

@@ -4,3 +4,7 @@ tmp/**
 .idea
 .idea/**
 tmp_mmdb/
+# 地理位置数据库不入库：由 scripts/fetch-geo-data.sh 下载（CI 构建时 / 本地开发）
+providers/**/*.mmdb
+providers/qqwry/qqwry.dat
+providers/**/.geoipupdate.lock
