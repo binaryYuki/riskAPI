@@ -4,15 +4,10 @@ import (
 	"encoding/xml"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/armon/go-radix"
 )
-
-// FastlyIPList represents Fastly IP list structure
-type FastlyIPList struct {
-	Addresses     []string `json:"addresses"`
-	IPv6Addresses []string `json:"ipv6_addresses"`
-}
 
 // CIDRInfo stores a parsed CIDR network and its original string representation
 type CIDRInfo struct {
@@ -84,30 +79,100 @@ type InfoResponse struct {
 
 // RadixCache 封装 radix.Tree，实现与 cache.Cache 兼容的接口
 // 支持 Set/Get/Delete/Flush/Items 方法
-// 仅支持永久缓存（不支持自动过期），如需过期可扩展
-
+// 可选 TTL 与最大条目数：达到上限时按写入顺序（FIFO）淘汰最旧条目；
+// 由于所有条目 TTL 相同，最旧写入即最早过期。ttl/maxEntries 为 0 表示不限制。
 type RadixCache struct {
-	tree  *radix.Tree
-	mutex sync.RWMutex
+	tree       *radix.Tree
+	mutex      sync.RWMutex
+	ttl        time.Duration
+	maxEntries int
+	order      []cacheOrderItem // 写入顺序队列，用于 FIFO 淘汰
+}
+
+type cacheEntry struct {
+	value     interface{}
+	expiresAt time.Time // 零值表示永不过期
+}
+
+type cacheOrderItem struct {
+	key       string
+	expiresAt time.Time
 }
 
 func NewRadixCache() *RadixCache {
+	return NewBoundedRadixCache(0, 0)
+}
+
+func NewBoundedRadixCache(maxEntries int, ttl time.Duration) *RadixCache {
 	return &RadixCache{
-		tree: radix.New(),
+		tree:       radix.New(),
+		ttl:        ttl,
+		maxEntries: maxEntries,
 	}
+}
+
+func (e cacheEntry) expired(now time.Time) bool {
+	return !e.expiresAt.IsZero() && now.After(e.expiresAt)
 }
 
 func (rc *RadixCache) Set(key string, value interface{}, _ ...interface{}) {
 	rc.mutex.Lock()
 	defer rc.mutex.Unlock()
-	rc.tree.Insert(key, value)
+
+	now := time.Now()
+	var expiresAt time.Time
+	if rc.ttl > 0 {
+		expiresAt = now.Add(rc.ttl)
+	}
+	rc.tree.Insert(key, cacheEntry{value: value, expiresAt: expiresAt})
+	if rc.maxEntries <= 0 && rc.ttl <= 0 {
+		return
+	}
+	rc.order = append(rc.order, cacheOrderItem{key: key, expiresAt: expiresAt})
+	rc.evictLocked(now)
+}
+
+// evictLocked 从队首清理过期条目，并在超出上限时淘汰最旧条目
+func (rc *RadixCache) evictLocked(now time.Time) {
+	for len(rc.order) > 0 {
+		head := rc.order[0]
+		v, ok := rc.tree.Get(head.key)
+		// 队首记录已失效（被删除或被覆盖写入）：直接丢弃
+		if !ok || !v.(cacheEntry).expiresAt.Equal(head.expiresAt) {
+			rc.order = rc.order[1:]
+			continue
+		}
+		overCap := rc.maxEntries > 0 && rc.tree.Len() > rc.maxEntries
+		if !overCap && !v.(cacheEntry).expired(now) {
+			break
+		}
+		rc.tree.Delete(head.key)
+		rc.order = rc.order[1:]
+	}
 }
 
 func (rc *RadixCache) Get(key string) (interface{}, bool) {
 	rc.mutex.RLock()
-	defer rc.mutex.RUnlock()
 	v, ok := rc.tree.Get(key)
-	return v, ok
+	rc.mutex.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	entry := v.(cacheEntry)
+	if entry.expired(time.Now()) {
+		rc.deleteIfExpired(key)
+		return nil, false
+	}
+	return entry.value, true
+}
+
+// deleteIfExpired 加写锁后再次确认过期，避免误删并发写入的新值
+func (rc *RadixCache) deleteIfExpired(key string) {
+	rc.mutex.Lock()
+	defer rc.mutex.Unlock()
+	if v, ok := rc.tree.Get(key); ok && v.(cacheEntry).expired(time.Now()) {
+		rc.tree.Delete(key)
+	}
 }
 
 func (rc *RadixCache) Delete(key string) {
@@ -120,14 +185,18 @@ func (rc *RadixCache) Flush() {
 	rc.mutex.Lock()
 	defer rc.mutex.Unlock()
 	rc.tree = radix.New()
+	rc.order = nil
 }
 
 func (rc *RadixCache) Items() map[string]interface{} {
 	rc.mutex.RLock()
 	defer rc.mutex.RUnlock()
+	now := time.Now()
 	items := make(map[string]interface{})
 	rc.tree.Walk(func(s string, v interface{}) bool {
-		items[s] = v
+		if entry := v.(cacheEntry); !entry.expired(now) {
+			items[s] = entry.value
+		}
 		return false
 	})
 	return items
@@ -147,6 +216,4 @@ var (
 	idcSingleIPs  map[string]map[string]bool // IDC 单个 IP 缓存
 	cdnIdcMutex   sync.RWMutex               // 保护 CDN/IDC 缓存的读写锁
 	cacheInitOnce sync.Once                  // 确保缓存只初始化一次
-
-	fastlyCIDRsMutex sync.RWMutex
 )

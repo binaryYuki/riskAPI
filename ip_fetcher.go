@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -11,69 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gin-gonic/gin"
 )
-
-// updateFastlyIPs updates Fastly IP addresses and sets trusted proxies
-func updateFastlyIPs(router *gin.Engine) {
-	for {
-		var ipList FastlyIPList
-		resp, err := http.Get("https://api.fastly.com/public-ip-list")
-		if err == nil && resp != nil {
-			func() {
-				defer func() {
-					if cerr := resp.Body.Close(); cerr != nil {
-						fmt.Println("resp.Body.Close error:", cerr)
-					}
-				}()
-				if err := json.NewDecoder(resp.Body).Decode(&ipList); err == nil {
-					fmt.Println("Fetched Fastly IPs from API")
-				} else {
-					fmt.Println("Decode Fastly IPs error:", err)
-				}
-			}()
-		} else {
-			// fallback to hardcoded IPs
-			ipList = FastlyIPList{
-				Addresses: []string{
-					"23.235.32.0/20", "43.249.72.0/22", "103.244.50.0/24",
-					"103.245.222.0/23", "103.245.224.0/24", "104.156.80.0/20",
-					"140.248.64.0/18", "140.248.128.0/17", "146.75.0.0/17",
-					"151.101.0.0/16", "157.52.64.0/18", "167.82.0.0/17",
-					"167.82.128.0/20", "167.82.160.0/20", "167.82.224.0/20",
-					"172.111.64.0/18", "185.31.16.0/22", "199.27.72.0/21",
-					"199.232.0.0/16",
-				},
-				IPv6Addresses: []string{
-					"2a04:4e40::/32", "2a04:4e42::/32",
-				},
-			}
-			fmt.Println("Using hardcoded Fastly IPs")
-		}
-
-		// combine local and Fastly IPs
-		allProxies := append([]string{}, localProxies...)
-		allProxies = append(allProxies, ipList.Addresses...)
-		allProxies = append(allProxies, ipList.IPv6Addresses...)
-		if err := router.SetTrustedProxies(allProxies); err != nil {
-			fmt.Println("SetTrustedProxies error:", err)
-		} else {
-			fmt.Printf("SetTrustedProxies: %d IPv4, %d IPv6\n", len(ipList.Addresses), len(ipList.IPv6Addresses))
-		}
-
-		// Parse CIDR strings into net.IPNet
-		cidrs := parseCIDRs(ipList.Addresses)
-		cidrs = append(cidrs, parseCIDRs(ipList.IPv6Addresses)...)
-
-		fastlyCIDRsMutex.Lock()
-		_ = cidrs
-		fastlyCIDRsMutex.Unlock()
-		fmt.Printf("Updated fastlyCIDRs: %d entries\n", len(cidrs))
-
-		time.Sleep(1 * time.Hour)
-	}
-}
 
 // updateIPListsPeriodically periodically updates risky IP lists
 func updateIPListsPeriodically(config Config) {

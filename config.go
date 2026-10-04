@@ -13,12 +13,9 @@ const (
 	updateFrequency   = 1 * time.Hour
 	infoCacheExpiry   = 1 * time.Hour           // /api/v1/info 缓存过期时间
 	infoLookupTimeout = 1500 * time.Millisecond // /api/v1/info 总体查询超时时间
-)
 
-// Local proxy networks
-var localProxies = []string{
-	"10.42.0.0/8", "10.0.0.0/16", "172.16.0.0/12", "fc00::/7",
-}
+	defaultInfoCacheMaxEntries = 20000 // /api/v1/info 缓存最大条目数（INFO_CACHE_MAX_ENTRIES 可覆盖）
+)
 
 // IP list APIs for fetching risky IPs
 var ipListAPIs = []string{
