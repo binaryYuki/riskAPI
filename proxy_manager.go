@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -13,106 +11,31 @@ import (
 // initCDNIDCCache initializes CDN and IDC caches
 func initCDNIDCCache() {
 	cacheInitOnce.Do(func() {
-		cdnIPCache = make(map[string][]CIDRInfo)
-		idcIPCache = make(map[string][]CIDRInfo)
-		cdnSingleIPs = make(map[string]map[string]bool)
-		idcSingleIPs = make(map[string]map[string]bool)
-
-		// Initialize CDN providers
-		cdnProviders := []string{"edgeone", "cloudflare", "fastly"}
-		for _, provider := range cdnProviders {
-			cdnSingleIPs[provider] = make(map[string]bool)
-			loadCDNIPList(provider)
-		}
-
-		// Initialize IDC providers
-		idcProviders := []string{"aws", "azure", "gcp", "akamai", "apple", "digitalocean", "linode", "oracle", "zscaler"}
-		for _, provider := range idcProviders {
-			idcSingleIPs[provider] = make(map[string]bool)
-			loadIDCIPList(provider)
-		}
+		syncCDNLists()
+		syncIDCLists()
 	})
-}
-
-// loadCDNIPList loads CDN IP list from file
-func loadCDNIPList(provider string) {
-	filePath := fmt.Sprintf("data/cdn/%s.txt", provider)
-	loadIPListFromFile(filePath, provider, true)
-}
-
-// loadIDCIPList loads IDC IP list from file
-func loadIDCIPList(provider string) {
-	filePath := fmt.Sprintf("data/idc/%s.txt", provider)
-	loadIPListFromFile(filePath, provider, false)
-}
-
-// loadIPListFromFile loads IP list from file and updates cache
-func loadIPListFromFile(filePath, provider string, isCDN bool) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		fmt.Printf("Warning: Could not open %s: %v\n", filePath, err)
-		return
-	}
-	defer func(file *os.File) { _ = file.Close() }(file)
-
-	var cidrs []CIDRInfo
-	singleIPs := make(map[string]bool)
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		if _, ipNet, err := net.ParseCIDR(line); err == nil {
-			cidrs = append(cidrs, CIDRInfo{Net: ipNet, OriginalCIDR: line})
-			continue
-		}
-		if ip := net.ParseIP(line); ip != nil {
-			singleIPs[line] = true
-		}
-	}
-
-	cdnIdcMutex.Lock()
-	if isCDN {
-		cdnIPCache[provider] = cidrs
-		cdnSingleIPs[provider] = singleIPs
-	} else {
-		idcIPCache[provider] = cidrs
-		idcSingleIPs[provider] = singleIPs
-	}
-	cdnIdcMutex.Unlock()
-
-	fmt.Printf("Loaded %s: %d CIDRs, %d single IPs\n", provider, len(cidrs), len(singleIPs))
 }
 
 // startCDNListSync starts CDN list synchronization
 func startCDNListSync() {
 	go func() {
 		for {
+			time.Sleep(24 * time.Hour) // Sync once daily（启动时已由 initCDNIDCCache 加载）
 			syncCDNLists()
-			syncIDCLists()             // Synchronize IDC lists as well
-			time.Sleep(24 * time.Hour) // Sync once daily
+			syncIDCLists()
 		}
 	}()
 }
 
-// syncCDNLists synchronizes CDN lists from data files to cache
+// syncCDNLists 重新加载 CDN 列表并原子替换查找表
 func syncCDNLists() {
-	cdnProviders := []string{"edgeone", "cloudflare", "fastly"}
-	for _, provider := range cdnProviders {
-		loadCDNIPList(provider)
-	}
+	cdnSet.Store(loadProviderSet("data/cdn", cdnProviders))
 	fmt.Println("CDN lists synchronized")
 }
 
-// syncIDCLists synchronizes IDC lists from data files to cache
+// syncIDCLists 重新加载 IDC 列表并原子替换查找表
 func syncIDCLists() {
-	idcProviders := []string{"aws", "azure", "gcp", "akamai", "apple", "digitalocean", "linode", "oracle", "zscaler"}
-	for _, provider := range idcProviders {
-		loadIDCIPList(provider)
-	}
+	idcSet.Store(loadProviderSet("data/idc", idcProviders))
 	fmt.Println("IDC lists synchronized")
 }
 
