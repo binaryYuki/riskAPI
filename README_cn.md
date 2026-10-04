@@ -107,6 +107,13 @@ docker-compose up -d
 | `HONEYTRAP_BASE_DELAY_MAX_MS` | 蜜罐最大延迟(毫秒) | `500` |
 | `HONEYTRAP_BLOCK_THRESHOLD` | 封禁阈值(次数) | `5` |
 | `HONEYTRAP_BLOCK_DURATION` | 封禁时长(秒) | `300` |
+| `HONEYTRAP_MAX_OFFENDERS` | 蜜罐最多跟踪的来源数 | `100000` |
+| `ADMIN_TOKEN` | `/api/cache/flush*` 的 Bearer 令牌；未设置时管理接口禁用 | _(未设置)_ |
+| `TRUSTED_PROXIES` | 允许读取转发头的可信代理 CIDR/IP，逗号分隔（已知 CDN 网段始终可信） | 回环 + 私网网段 |
+| `PARSE_VV_SECRET` | `/api/v1/parse` 的 HMAC 签名密钥；未设置时接口返回 503 | _(未设置)_ |
+| `PARSE_WORKER_BASE` | 上游解析 Worker 地址 | `https://xhs-proxy.tzpro.workers.dev` |
+| `PARSE_RATE_LIMIT_PER_MIN` | `/api/v1/parse` 每个客户端 IP 每分钟请求上限（`0` 不限流） | `30` |
+| `INFO_CACHE_MAX_ENTRIES` | `/api/v1/info` 缓存最大条目数（TTL 1 小时） | `20000` |
 
 ## API文档
 
@@ -211,6 +218,7 @@ GET /version
 ```
 
 ### 6. 缓存管理 (新功能)
+需设置 `ADMIN_TOKEN`，并携带请求头 `Authorization: Bearer <ADMIN_TOKEN>`。
 ```bash
 # 刷新缓存索引
 GET /api/cache/flush

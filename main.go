@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -17,8 +18,7 @@ func main() {
 	log.Printf("GOMAXPROCS set to %d", runtime.GOMAXPROCS(0))
 
 	// Initialize cache and data structures
-	appCache = NewRadixCache()
-	_ = make(map[string]bool)
+	appCache = NewBoundedRadixCache(getEnvInt("INFO_CACHE_MAX_ENTRIES", defaultInfoCacheMaxEntries), infoCacheExpiry)
 	riskyCIDRInfo = make([]CIDRInfo, 0)
 	reasonMap = make(map[string]string)
 
@@ -57,6 +57,10 @@ func main() {
 
 	// Setup router
 	router := gin.New()
+	// 客户端 IP 统一由 getClientIPFromCDNHeaders 按可信代理规则解析，禁用 gin 自带的转发头信任
+	if err := router.SetTrustedProxies(nil); err != nil {
+		log.Fatalf("Failed to disable gin trusted proxies: %v", err)
+	}
 	router.Use(gin.Recovery())
 	router.Use(cors.New(corsConfig))
 	router.Use(CrossOriginResourcePolicyMiddleware())
@@ -67,10 +71,10 @@ func main() {
 	router.Use(SensitivePathMiddleware())
 
 	// Start background services
-	go updateFastlyIPs(router)
+	// 必须先初始化 CDN/IDC 缓存 map，再启动会写入这些 map 的同步协程
+	initCDNIDCCache()
 	go updateIPListsPeriodically(config)
 	startCDNListSync()
-	initCDNIDCCache()
 
 	// Setup routes
 	setupRoutes(router)
@@ -116,7 +120,9 @@ func setupRoutes(router *gin.Engine) {
 	router.GET("/api/status", statusHandler)
 
 	router.GET("/api/v1/info", ipInfoHandler)
-	router.GET("/api/v1/parse", parseProxyHandler)
+	router.GET("/api/v1/parse",
+		RateLimitMiddleware(getEnvInt("PARSE_RATE_LIMIT_PER_MIN", 30), time.Minute),
+		parseProxyHandler)
 	infoGroup := router.Group("/api/v1/info")
 	{
 		infoGroup.GET("/:ip", ipInfoHandler)
@@ -134,8 +140,12 @@ func setupRoutes(router *gin.Engine) {
 
 	router.GET("/api/metrics", metricsHandler)
 
-	router.GET("/api/cache/flush", flushCacheIndexHandler)
-	router.POST("/api/cache/flush/:method/*range", flushCacheHandler)
+	// 管理接口：需 Authorization: Bearer <ADMIN_TOKEN>
+	adminGroup := router.Group("/api/cache", AdminAuthMiddleware(os.Getenv("ADMIN_TOKEN")))
+	{
+		adminGroup.GET("/flush", flushCacheIndexHandler)
+		adminGroup.POST("/flush/:method/*range", flushCacheHandler)
+	}
 
 	// 纯真数据库状态路由
 	router.GET("/api/qqwry/stats", qqwryStatsHandler)
