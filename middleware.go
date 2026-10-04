@@ -3,7 +3,9 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -64,8 +66,8 @@ func SensitivePathMiddleware() gin.HandlerFunc {
 				c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 				c.Header("Pragma", "no-cache")
 				c.Header("Expires", "0")
-				c.Status(http.StatusForbidden)
-				c.File("data/pages/403.html")
+				// 不用 c.File：http.ServeFile 会把已设置的 403 覆盖为 200
+				c.Data(http.StatusForbidden, "text/html; charset=utf-8", forbiddenPage())
 			} else {
 				c.JSON(403, gin.H{"error": "forbidden"})
 			}
@@ -73,6 +75,24 @@ func SensitivePathMiddleware() gin.HandlerFunc {
 			return
 		}
 	}
+}
+
+var (
+	forbiddenPageOnce sync.Once
+	forbiddenPageHTML []byte
+)
+
+// forbiddenPage 首次调用时读取 403 页面并缓存，读取失败时回退为纯文本
+func forbiddenPage() []byte {
+	forbiddenPageOnce.Do(func() {
+		data, err := os.ReadFile("data/pages/403.html")
+		if err != nil {
+			log.Printf("Warning: failed to read 403 page: %v", err)
+			data = []byte("403 Forbidden")
+		}
+		forbiddenPageHTML = data
+	})
+	return forbiddenPageHTML
 }
 
 // CrossOriginResourcePolicyMiddleware 设置 cross-origin-resource-policy 响应头

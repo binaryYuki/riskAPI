@@ -15,6 +15,7 @@ import (
 )
 
 type offenderStat struct {
+	mu         sync.Mutex
 	Count      int64
 	FirstSeen  time.Time
 	LastSeen   time.Time
@@ -35,12 +36,15 @@ type HoneytrapConfig struct {
 	BlockThreshold int           // 次数阈值
 	BlockWindow    time.Duration // 统计窗口
 	BlockDuration  time.Duration // 封禁时长
+
+	MaxOffenders int // 最多跟踪的来源数，超出后新来源不再计数（仍施加基础延迟）
 }
 
 // 运行时状态
 var (
-	// offenders: key=ip|ua, val=*offenderStat
-	offenders sync.Map
+	// offenders: key=客户端 IP, val=*offenderStat
+	offenders        sync.Map
+	trackedOffenders int64
 
 	// 指标
 	honeyHitsTotal      uint64
@@ -72,6 +76,12 @@ func Honeytrap(cfg HoneytrapConfig) gin.HandlerFunc {
 	if cfg.BlockDuration <= 0 {
 		cfg.BlockDuration = 2 * time.Minute
 	}
+	if cfg.MaxOffenders <= 0 {
+		cfg.MaxOffenders = 100000
+	}
+	if cfg.Enabled {
+		go offenderJanitor(cfg)
+	}
 
 	return func(c *gin.Context) {
 		if !cfg.Enabled {
@@ -86,43 +96,46 @@ func Honeytrap(cfg HoneytrapConfig) gin.HandlerFunc {
 		}
 
 		ip := getClientIPFromCDNHeaders(c)
-		ua := c.Request.Header.Get("User-Agent")
-		if ua == "" {
-			ua = "-"
-		}
-		if len(ua) > 128 {
-			ua = ua[:128]
-		}
-		key := ip + "|" + ua
+		now := time.Now()
 
-		val, _ := offenders.LoadOrStore(key, &offenderStat{FirstSeen: time.Now(), LastSeen: time.Now()})
-		st := val.(*offenderStat)
+		// 计数与封禁判断在单条记录锁内完成，避免并发读写竞争
+		var cnt int64
+		blocked, newlyBlocked := false, false
+		var blockUntil time.Time
+		if st := loadOrTrackOffender(ip, now, cfg.MaxOffenders); st != nil {
+			st.mu.Lock()
+			if now.Before(st.BlockUntil) {
+				blocked = true
+			} else {
+				// 简单固定窗口：超过窗口则重置计数起点
+				if now.Sub(st.FirstSeen) > cfg.BlockWindow {
+					st.FirstSeen = now
+					st.Count = 0
+				}
+				st.Count++
+				if int(st.Count) >= cfg.BlockThreshold {
+					st.BlockUntil = now.Add(cfg.BlockDuration)
+					newlyBlocked = true
+				}
+			}
+			st.LastSeen = now
+			cnt = st.Count
+			blockUntil = st.BlockUntil
+			st.mu.Unlock()
+		} else {
+			cnt = 1 // 超出跟踪上限：不计数，仅施加基础延迟
+		}
 
 		// 如果在封禁期内，直接 429
-		if time.Now().Before(st.BlockUntil) {
+		if blocked {
 			atomic.AddUint64(&honeyBlocksTotal, 1)
 			if cfg.EnableLog {
-				log.Printf("[Honeytrap] block 429 ip=%s path=%s until=%s", ip, path, st.BlockUntil.Format(time.RFC3339))
+				log.Printf("[Honeytrap] block 429 ip=%s path=%s until=%s", ip, path, blockUntil.Format(time.RFC3339))
 			}
 			c.AbortWithStatus(429)
 			return
 		}
-
-		// 命中计数与窗口判断
-		now := time.Now()
-		atomic.AddInt64(&st.Count, 1)
-		st.LastSeen = now
-
-		// 简单滑动窗口：如果窗口之外，重置计数起点
-		// 使用 FirstSeen 作为窗口起点；超过窗口则重置
-		if now.Sub(st.FirstSeen) > cfg.BlockWindow {
-			st.FirstSeen = now
-			atomic.StoreInt64(&st.Count, 1)
-		}
-
-		cnt := atomic.LoadInt64(&st.Count)
-		if int(cnt) >= cfg.BlockThreshold {
-			st.BlockUntil = now.Add(cfg.BlockDuration)
+		if newlyBlocked {
 			atomic.AddUint64(&honeyBlocksTotal, 1)
 			if cfg.EnableLog {
 				log.Printf("[Honeytrap] soft block ip=%s path=%s count=%d duration=%s", ip, path, cnt, cfg.BlockDuration)
@@ -159,6 +172,43 @@ func Honeytrap(cfg HoneytrapConfig) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// loadOrTrackOffender 返回来源的统计记录；超出跟踪上限的新来源返回 nil
+func loadOrTrackOffender(ip string, now time.Time, maxOffenders int) *offenderStat {
+	if v, ok := offenders.Load(ip); ok {
+		return v.(*offenderStat)
+	}
+	if atomic.LoadInt64(&trackedOffenders) >= int64(maxOffenders) {
+		return nil
+	}
+	v, loaded := offenders.LoadOrStore(ip, &offenderStat{FirstSeen: now, LastSeen: now})
+	if !loaded {
+		atomic.AddInt64(&trackedOffenders, 1)
+	}
+	return v.(*offenderStat)
+}
+
+// offenderJanitor 定期清理窗口已过且未处于封禁期的记录，防止 offenders 无限增长
+func offenderJanitor(cfg HoneytrapConfig) {
+	ticker := time.NewTicker(cfg.BlockWindow)
+	defer ticker.Stop()
+	for now := range ticker.C {
+		pruneOffenders(now, cfg.BlockWindow)
+	}
+}
+
+func pruneOffenders(now time.Time, window time.Duration) {
+	offenders.Range(func(k, v any) bool {
+		st := v.(*offenderStat)
+		st.mu.Lock()
+		stale := now.Sub(st.LastSeen) > window && !now.Before(st.BlockUntil)
+		st.mu.Unlock()
+		if stale && offenders.CompareAndDelete(k, v) {
+			atomic.AddInt64(&trackedOffenders, -1)
+		}
+		return true
+	})
 }
 
 func pickServerHeader() string {
@@ -218,6 +268,7 @@ func HoneytrapConfigFromEnv() HoneytrapConfig {
 		BlockThreshold: getEnvInt("HONEYTRAP_BLOCK_THRESHOLD", 16),
 		BlockWindow:    time.Duration(getEnvInt("HONEYTRAP_BLOCK_WINDOW_SEC", 60)) * time.Second,
 		BlockDuration:  time.Duration(getEnvInt("HONEYTRAP_BLOCK_DURATION_SEC", 180)) * time.Second,
+		MaxOffenders:   getEnvInt("HONEYTRAP_MAX_OFFENDERS", 100000),
 	}
 	return cfg
 }
@@ -260,11 +311,6 @@ func getEnvBool(key string, def bool) bool {
 
 // HoneytrapMetricsSnapshot 返回蜜罐指标快照
 func HoneytrapMetricsSnapshot() (hits, fakeOK, blocks, penaltyTotal uint64, offendersCount int) {
-	// 估算 offenders 数量
-	offendersCount = 0
-	offenders.Range(func(_, _ any) bool {
-		offendersCount++
-		return true
-	})
+	offendersCount = int(atomic.LoadInt64(&trackedOffenders))
 	return atomic.LoadUint64(&honeyHitsTotal), atomic.LoadUint64(&honeyFakeOKTotal), atomic.LoadUint64(&honeyBlocksTotal), atomic.LoadUint64(&honeyPenaltyMsTotal), offendersCount
 }
