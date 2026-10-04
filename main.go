@@ -19,8 +19,7 @@ func main() {
 
 	// Initialize cache and data structures
 	appCache = NewBoundedRadixCache(getEnvInt("INFO_CACHE_MAX_ENTRIES", defaultInfoCacheMaxEntries), infoCacheExpiry)
-	riskyCIDRInfo = make([]CIDRInfo, 0)
-	reasonMap = make(map[string]string)
+	storeRiskySet(newPrefixSet())
 
 	// Initialize QQWry database
 	log.Printf("Initializing QQWry database...")

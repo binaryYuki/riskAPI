@@ -1,94 +1,25 @@
 package main
 
 import (
-	"net"
 	"strings"
 )
 
 // isRiskyIP checks if an IP address is in the risky IP list
 func isRiskyIP(ip string) (bool, string) {
-	riskyDataMutex.RLock()
-	defer riskyDataMutex.RUnlock()
-
-	// Check single IPs first (faster lookup)
-	if reason, exists := reasonMap[ip]; exists {
-		return true, reason
-	}
-
-	// Check CIDR ranges
-	ipAddr := net.ParseIP(ip)
-	if ipAddr == nil {
-		return false, ""
-	}
-
-	for _, cidrInfo := range riskyCIDRInfo {
-		if cidrInfo.Net.Contains(ipAddr) {
-			if reason, exists := reasonMap[cidrInfo.OriginalCIDR]; exists {
-				return true, reason
-			}
-			return true, "Unknown reason"
-		}
-	}
-
-	return false, ""
+	reason, ok := riskySet.Load().lookup(ip)
+	return ok, reason
 }
 
 // isCDNIP checks if an IP belongs to any CDN
 func isCDNIP(ip string) (bool, string) {
-	cdnIdcMutex.RLock()
-	defer cdnIdcMutex.RUnlock()
-
-	ipAddr := net.ParseIP(ip)
-	if ipAddr == nil {
-		return false, ""
-	}
-
-	// Check single IPs first
-	for provider, singleIPs := range cdnSingleIPs {
-		if singleIPs[ip] {
-			return true, provider
-		}
-	}
-
-	// Check CIDR ranges
-	for provider, cidrs := range cdnIPCache {
-		for _, cidrInfo := range cidrs {
-			if cidrInfo.Net.Contains(ipAddr) {
-				return true, provider
-			}
-		}
-	}
-
-	return false, ""
+	provider, ok := cdnSet.Load().lookup(ip)
+	return ok, provider
 }
 
 // isIDCIP checks if an IP belongs to any IDC
 func isIDCIP(ip string) (bool, string) {
-	cdnIdcMutex.RLock()
-	defer cdnIdcMutex.RUnlock()
-
-	ipAddr := net.ParseIP(ip)
-	if ipAddr == nil {
-		return false, ""
-	}
-
-	// Check single IPs first
-	for provider, singleIPs := range idcSingleIPs {
-		if singleIPs[ip] {
-			return true, provider
-		}
-	}
-
-	// Check CIDR ranges
-	for provider, cidrs := range idcIPCache {
-		for _, cidrInfo := range cidrs {
-			if cidrInfo.Net.Contains(ipAddr) {
-				return true, provider
-			}
-		}
-	}
-
-	return false, ""
+	provider, ok := idcSet.Load().lookup(ip)
+	return ok, provider
 }
 
 // getSourceIdentifier returns source identifier from API URL
