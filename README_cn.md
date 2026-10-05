@@ -23,9 +23,10 @@
 - **结果聚合**: 多数据源结果统一格式输出
 
 ### 🛡️ 蜜罐防护系统
-- **可疑路径检测**: 识别对敏感路径的访问尝试
-- **自适应延迟**: 对可疑请求实施渐进式延迟惩罚
-- **软封机制**: 基于频次的临时封禁策略
+- **可疑路径检测**: 按请求路径匹配常被扫描的路径列表
+- **自适应延迟**: 随机基础延迟，同一IP重复命中时追加指数增长的惩罚延迟
+- **伪造200响应**: 按概率对可疑请求返回伪造的OK页面
+- **软封机制**: 同一IP命中次数达到阈值后，对其可疑路径请求返回429
 - **诱饵路由**: 可选的蜜罐路由部署
 
 ### 🚀 CDN/IDC识别
@@ -103,13 +104,17 @@ docker-compose up -d
 | 变量名 | 描述 | 默认值 |
 |--------|------|--------|
 | `ALLOWED_CORS` | 允许的CORS域名，逗号分隔 | `catyuki.com,tzpro.xyz` |
-| `HONEYTRAP_ENABLED` | 是否启用蜜罐防护 | `false` |
+| `HONEYTRAP_ENABLED` | 是否启用蜜罐防护 | `true` |
 | `HONEYTRAP_DECOYS` | 是否启用诱饵路由 | `false` |
-| `HONEYTRAP_BASE_DELAY_MIN_MS` | 蜜罐最小延迟(毫秒) | `100` |
-| `HONEYTRAP_BASE_DELAY_MAX_MS` | 蜜罐最大延迟(毫秒) | `500` |
-| `HONEYTRAP_BLOCK_THRESHOLD` | 封禁阈值(次数) | `5` |
-| `HONEYTRAP_BLOCK_DURATION` | 封禁时长(秒) | `300` |
-| `HONEYTRAP_MAX_OFFENDERS` | 蜜罐最多跟踪的来源数 | `100000` |
+| `HONEYTRAP_BASE_DELAY_MIN_MS` | 命中可疑路径的最小基础延迟(毫秒) | `40` |
+| `HONEYTRAP_BASE_DELAY_MAX_MS` | 命中可疑路径的最大基础延迟(毫秒) | `220` |
+| `HONEYTRAP_MAX_PENALTY_MS` | 重复命中追加延迟的上限(毫秒) | `1200` |
+| `HONEYTRAP_FAKEOK` | 对可疑请求返回伪造 200 页面的概率 | `0.2` |
+| `HONEYTRAP_LOG` | 是否记录每次蜜罐命中 | `true` |
+| `HONEYTRAP_BLOCK_THRESHOLD` | 窗口内触发软封的命中次数 | `16` |
+| `HONEYTRAP_BLOCK_WINDOW_SEC` | 封禁阈值的统计窗口(秒) | `60` |
+| `HONEYTRAP_BLOCK_DURATION_SEC` | 软封时长(秒) | `180` |
+| `HONEYTRAP_MAX_OFFENDERS` | 蜜罐最多跟踪的来源数；超出后的新来源只延迟、不封禁 | `100000` |
 | `ADMIN_TOKEN` | `/api/cache/flush*` 的 Bearer 令牌；未设置时管理接口禁用 | _(未设置)_ |
 | `TRUSTED_PROXIES` | 允许读取转发头的可信代理 CIDR/IP，逗号分隔（已知 CDN 网段始终可信） | 回环 + 私网网段 |
 | `PARSE_VV_SECRET` | `/api/v1/parse` 的 HMAC 签名密钥；未设置时接口返回 503 | _(未设置)_ |
@@ -263,10 +268,10 @@ POST /api/cache/flush/{method}/{range}
 ## 安全特性
 
 ### 蜜罐防护
-- **路径检测**: 自动识别对管理后台的访问尝试
-- **行为分析**: 基于User-Agent和访问模式的异常检测  
-- **渐进惩罚**: 首次警告，重复访问逐步增加延迟
-- **智能封禁**: 短期软封禁机制，避免误封正常用户
+- **路径检测**: 仅按请求路径判定（管理后台、CMS登录、敏感文件、API文档、CGI等常被扫描的端点），不检查User-Agent和请求体
+- **按IP计数**: 在固定窗口内按客户端IP累计命中次数
+- **渐进惩罚**: 每次命中都会延迟；窗口内第二次起延迟指数增长并封顶
+- **软封禁**: 达到阈值后，该IP在封禁时长内访问可疑路径一律返回429；正常API路由不受影响
 
 ### 访问控制
 - **CORS策略**: 严格的跨域访问控制

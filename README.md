@@ -25,9 +25,10 @@ A high-performance Go-based service providing comprehensive IP risk detection, g
 - **Result Aggregation**: Unified format output from multiple data sources
 
 ### 🛡️ Honeypot Protection System
-- **Suspicious Path Detection**: Identifies access attempts to sensitive paths
-- **Adaptive Delays**: Progressive delay penalties for suspicious requests
-- **Soft Blocking**: Temporary blocking based on frequency thresholds
+- **Suspicious Path Detection**: Matches request paths against a list of commonly scanned paths
+- **Adaptive Delays**: Random base delay plus an exponential penalty for repeat hits from the same IP
+- **Fake 200 Responses**: Randomly answers suspicious requests with a fake OK page
+- **Soft Blocking**: Returns 429 on suspicious paths once an IP exceeds the hit threshold
 - **Decoy Routes**: Optional honeypot route deployment
 
 ### 🚀 CDN/IDC Identification
@@ -105,13 +106,17 @@ docker-compose up -d
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `ALLOWED_CORS` | Allowed CORS domains, comma-separated | `catyuki.com,tzpro.xyz` |
-| `HONEYTRAP_ENABLED` | Enable honeypot protection | `false` |
+| `HONEYTRAP_ENABLED` | Enable honeypot protection | `true` |
 | `HONEYTRAP_DECOYS` | Enable decoy routes | `false` |
-| `HONEYTRAP_BASE_DELAY_MIN_MS` | Minimum honeypot delay (ms) | `100` |
-| `HONEYTRAP_BASE_DELAY_MAX_MS` | Maximum honeypot delay (ms) | `500` |
-| `HONEYTRAP_BLOCK_THRESHOLD` | Block threshold (attempts) | `5` |
-| `HONEYTRAP_BLOCK_DURATION` | Block duration (seconds) | `300` |
-| `HONEYTRAP_MAX_OFFENDERS` | Max tracked honeypot offenders | `100000` |
+| `HONEYTRAP_BASE_DELAY_MIN_MS` | Minimum base delay on a suspicious path (ms) | `40` |
+| `HONEYTRAP_BASE_DELAY_MAX_MS` | Maximum base delay on a suspicious path (ms) | `220` |
+| `HONEYTRAP_MAX_PENALTY_MS` | Cap on the extra delay added for repeat hits (ms) | `1200` |
+| `HONEYTRAP_FAKEOK` | Probability of answering a suspicious request with a fake 200 page | `0.2` |
+| `HONEYTRAP_LOG` | Log every honeypot hit | `true` |
+| `HONEYTRAP_BLOCK_THRESHOLD` | Hits within the window that trigger a soft block | `16` |
+| `HONEYTRAP_BLOCK_WINDOW_SEC` | Counting window for the block threshold (seconds) | `60` |
+| `HONEYTRAP_BLOCK_DURATION_SEC` | Soft block duration (seconds) | `180` |
+| `HONEYTRAP_MAX_OFFENDERS` | Max tracked honeypot offenders; sources beyond it are delayed but never blocked | `100000` |
 | `ADMIN_TOKEN` | Bearer token for `/api/cache/flush*`; admin endpoints are disabled when unset | _(unset)_ |
 | `TRUSTED_PROXIES` | Comma-separated CIDRs/IPs whose forwarding headers are trusted (known CDN ranges are always trusted) | loopback + private ranges |
 | `PARSE_VV_SECRET` | HMAC secret for `/api/v1/parse`; the endpoint returns 503 when unset | _(unset)_ |
@@ -265,10 +270,10 @@ POST /api/cache/flush/{method}/{range}
 ## Security Features
 
 ### Honeypot Protection
-- **Path Detection**: Automatically identifies admin panel access attempts
-- **Behavioral Analysis**: Anomaly detection based on User-Agent and access patterns
-- **Progressive Penalties**: Initial warnings, escalating delays for repeat access
-- **Smart Blocking**: Short-term soft blocking to avoid blocking legitimate users
+- **Path Detection**: Detection is by request path only (admin panels, CMS logins, sensitive files, API docs, CGI and other commonly scanned endpoints); User-Agent and request body are not inspected
+- **Per-IP Counting**: Hits are counted per client IP in a fixed window
+- **Progressive Penalties**: Every hit is delayed; from the second hit in a window the delay grows exponentially up to a cap
+- **Soft Blocking**: At the threshold the IP gets 429 on suspicious paths for the block duration; normal API routes stay reachable
 
 ### Access Control
 - **CORS Policy**: Strict cross-origin access control
