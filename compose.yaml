@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
     # 只监听本机，由宿主机上的反向代理对外提供服务
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:10100:8080"
     env_file:
       - path: .env
         required: false
