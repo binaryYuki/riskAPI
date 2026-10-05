@@ -270,7 +270,7 @@ POST /api/cache/flush/{method}/{range}
 ## Security Features
 
 ### Honeypot Protection
-- **Path Detection**: Detection is by request path only (admin panels, CMS logins, sensitive files, API docs, CGI and other commonly scanned endpoints); User-Agent and request body are not inspected
+- **Path Detection**: Detection is by request path only (admin panels, CMS logins, sensitive files, CGI and other commonly scanned endpoints); User-Agent and request body are not inspected
 - **Per-IP Counting**: Hits are counted per client IP in a fixed window
 - **Progressive Penalties**: Every hit is delayed; from the second hit in a window the delay grows exponentially up to a cap
 - **Soft Blocking**: At the threshold the IP gets 429 on suspicious paths for the block duration; normal API routes stay reachable

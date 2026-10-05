@@ -78,6 +78,24 @@ func TestTrap_DisabledAndNonSuspiciousPassThrough(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+func TestDefaultSuspiciousRegex(t *testing.T) {
+	re := DefaultSuspiciousRegex()
+	for _, p := range []string{
+		"/.env", "/wp-login.php", "/.aws/credentials", "/app/.aws/config",
+		"/cgi-bin/luci", "/manager/html", "/lib/phpunit/phpunit/src/Util/PHP/eval-stdin.php",
+	} {
+		assert.True(t, re.MatchString(p), p)
+	}
+	for _, p := range []string{
+		"/", "/api/v1/ip", "/api/v1/ip/8.8.8.8", "/api/v1/info", "/api/v1/parse", "/filter-proxies",
+		"/cdn/all", "/api/status", "/api/ready", "/version", "/api/metrics", "/metrics", "/api/export",
+		"/api/qqwry/stats", "/api/cache/flush",
+		"/swagger.json", "/swagger-ui.html", "/api/swagger.json", "/v2/api-docs",
+	} {
+		assert.False(t, re.MatchString(p), p)
+	}
+}
+
 func TestBackoffPenalty(t *testing.T) {
 	assert.Equal(t, 0, backoffPenalty(1, 1000))
 	assert.Equal(t, 50, backoffPenalty(2, 1000))
