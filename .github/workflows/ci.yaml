@@ -19,9 +19,10 @@ on:
       - 'README.md'
       - 'README_cn.md'
       - 'docs/**'
-  # 每日下载最新地理位置数据库、构建镜像并重新部署（取代原 auto-update 提交 mmdb 的流程）
+  # 每日下载最新地理位置数据库、构建镜像并重新部署（取代原 auto-update 提交 mmdb 的流程）。
+  # 避开整点：GitHub 在整点负载最高，定时任务常被延迟数小时甚至丢弃（原 03:00 实际 08:18~09:46 才执行）
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "37 2 * * *"
   # 在非 master 分支手动运行时只构建验证，不推送镜像、不部署、不更新 Release
   workflow_dispatch:
 
