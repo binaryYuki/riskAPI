@@ -37,12 +37,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download -x
 
 # Build binary with custom version: YYMMDDHHMM-<commit[:6]>
+# 构建上下文可能不含 .git（如 Portainer 从 Git 部署），此时 commit 记为 unknown
 ARG TARGETOS
 ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=bind,target=. \
-    --mount=type=bind,source=.git,target=.git \
-    VERSION="$(date -u +'%y%m%d%H%M')-$(git rev-parse --short=6 HEAD)" && \
+    COMMIT="$(git rev-parse --short=6 HEAD 2>/dev/null || echo unknown)" && \
+    VERSION="$(date -u +'%y%m%d%H%M')-${COMMIT}" && \
     CGO_ENABLED=0 \
     GOOS=$TARGETOS \
     GOARCH=$TARGETARCH \
