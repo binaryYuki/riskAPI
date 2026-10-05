@@ -34,18 +34,20 @@ type Store struct {
 	set     atomic.Pointer[ipset.Set]
 	writeMu sync.Mutex // 串行化整表替换 / 单条删除
 
-	updateMu sync.Mutex         // 串行化 Update，保护 lastGood
-	lastGood map[string][]Entry // 每个源最近一次成功的条目（Feed.ID → entries）
-	ready    atomic.Bool        // 首轮更新完成且至少一个源可用
+	updateMu   sync.Mutex           // 串行化 Update，保护 lastGood 与 validators
+	lastGood   map[string][]Entry   // 每个源最近一次成功的条目（Feed.ID → entries）
+	validators map[string]validator // lastGood 对应响应的校验值，与 lastGood 同步更新
+	ready      atomic.Bool          // 首轮更新完成且至少一个源可用
 }
 
 // NewStore 创建空的风险表
 func NewStore(feeds []Feed, fetch FetchConfig, log *slog.Logger) *Store {
 	s := &Store{
-		feeds:    feeds,
-		fetch:    fetch,
-		log:      log,
-		lastGood: make(map[string][]Entry),
+		feeds:      feeds,
+		fetch:      fetch,
+		log:        log,
+		lastGood:   make(map[string][]Entry),
+		validators: make(map[string]validator),
 	}
 	s.set.Store(ipset.New())
 	return s
@@ -123,7 +125,8 @@ func (s *Store) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Update 并发抓取全部数据源，失败的源沿用上次成功的数据，再整体替换风险表
+// Update 并发抓取全部数据源，未变化（304）或失败的源沿用上次成功的数据，再整体替换风险表。
+// 即使所有源都未变化也会重建，保证 Clear / Remove 之后的表能在下一轮恢复。
 func (s *Store) Update(ctx context.Context) {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
@@ -132,17 +135,22 @@ func (s *Store) Update(ctx context.Context) {
 	s.stats.reset()
 
 	type result struct {
-		entries []Entry
-		err     error
+		fetched
+		err error
 	}
 	results := make([]result, len(s.feeds))
 	var wg sync.WaitGroup
 	for i, feed := range s.feeds {
+		// 只有手里有上次的数据才发条件请求，否则 304 时无数据可用
+		var cond validator
+		if s.lastGood[feed.ID] != nil {
+			cond = s.validators[feed.ID]
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			entries, err := s.fetchFeed(ctx, feed)
-			results[i] = result{entries: entries, err: err}
+			res, err := s.fetchFeed(ctx, feed, cond)
+			results[i] = result{fetched: res, err: err}
 		}()
 	}
 	wg.Wait()
@@ -154,12 +162,15 @@ func (s *Store) Update(ctx context.Context) {
 
 	// 按配置顺序合并，保证同一前缀出现在多个源时标签确定
 	var merged []Entry
-	fresh, stale, missing := 0, 0, 0
+	fresh, unchanged, stale, missing := 0, 0, 0, 0
 	for i, r := range results {
 		feed := s.feeds[i]
 		switch {
+		case r.err == nil && r.notModified:
+			unchanged++
 		case r.err == nil:
 			s.lastGood[feed.ID] = r.entries
+			s.validators[feed.ID] = r.validator
 			fresh++
 		case s.lastGood[feed.ID] != nil:
 			s.log.Warn("source failed, reusing last successful data", "source", feed.ID, "err", r.err, "entries", len(s.lastGood[feed.ID]))
@@ -171,9 +182,9 @@ func (s *Store) Update(ctx context.Context) {
 		}
 		merged = append(merged, s.lastGood[feed.ID]...)
 	}
-	s.log.Info("risk list sources", "fresh", fresh, "stale", stale, "unavailable", missing, "entries", len(merged))
+	s.log.Info("risk list sources", "fresh", fresh, "unchanged", unchanged, "stale", stale, "unavailable", missing, "entries", len(merged))
 
-	if fresh+stale == 0 {
+	if fresh+unchanged+stale == 0 {
 		s.log.Warn("no data obtained from any source, risk list not updated")
 		return
 	}

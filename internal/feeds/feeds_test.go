@@ -101,6 +101,62 @@ func TestUpdate_ReadinessAndAllSourcesDown(t *testing.T) {
 	assert.Equal(t, 2, s.Stats().FetchAttempts)
 }
 
+func TestUpdate_ConditionalRequests(t *testing.T) {
+	var etag atomic.Value
+	etag.Store(`"v1"`)
+	var body atomic.Value
+	body.Store("5.5.5.0/24\n")
+	var full, notModified atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := etag.Load().(string)
+		if r.Header.Get("If-None-Match") == current {
+			notModified.Add(1)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		full.Add(1)
+		w.Header().Set("ETag", current)
+		_, _ = io.WriteString(w, body.Load().(string))
+	}))
+	defer srv.Close()
+	s := newTestStore(srv.URL)
+
+	// 首轮没有校验值：全量抓取
+	s.Update(context.Background())
+	assert.Equal(t, int32(1), full.Load())
+	assert.True(t, isRisky(s, "5.5.5.9"))
+
+	// 源未变化：304，沿用上次数据，且不计为失败
+	s.Update(context.Background())
+	assert.Equal(t, int32(1), full.Load())
+	assert.Equal(t, int32(1), notModified.Load())
+	assert.True(t, isRisky(s, "5.5.5.9"))
+	assert.Equal(t, 0, s.Stats().FetchFailures)
+	assert.Equal(t, 1, s.Stats().FetchAttempts)
+
+	// 清空后即使源返回 304 也要把表重建回来
+	s.Clear()
+	s.Update(context.Background())
+	assert.Equal(t, int32(2), notModified.Load())
+	assert.True(t, isRisky(s, "5.5.5.9"), "table must be rebuilt after Clear even when the source is unchanged")
+
+	// 源变化：重新全量抓取并替换旧数据
+	etag.Store(`"v2"`)
+	body.Store("6.6.6.0/24\n")
+	s.Update(context.Background())
+	assert.Equal(t, int32(2), full.Load())
+	assert.True(t, isRisky(s, "6.6.6.9"))
+	assert.False(t, isRisky(s, "5.5.5.9"))
+}
+
+func TestFetchFeed_UnsolicitedNotModifiedIsError(t *testing.T) {
+	srv := textServer(func() (int, string) { return http.StatusNotModified, "" })
+	defer srv.Close()
+	s := newTestStore()
+	_, err := s.fetchFeed(context.Background(), Feed{ID: "x", URL: srv.URL}, validator{})
+	assert.Error(t, err, "304 without a conditional request leaves no data to reuse")
+}
+
 func TestUpdate_LaterSourceWinsForDuplicatePrefix(t *testing.T) {
 	a := textServer(func() (int, string) { return http.StatusOK, "1.2.3.0/24\n" })
 	defer a.Close()
@@ -207,7 +263,7 @@ func TestFetchFeed_CancelDuringRetryBackoff(t *testing.T) {
 		cancel()
 	}()
 	start := time.Now()
-	_, err := s.fetchFeed(ctx, Feed{ID: "x", URL: srv.URL})
+	_, err := s.fetchFeed(ctx, Feed{ID: "x", URL: srv.URL}, validator{})
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Less(t, time.Since(start), 2*time.Second, "retry backoff must be interruptible")
 }

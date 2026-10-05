@@ -28,8 +28,22 @@ type rssFeed struct {
 	} `xml:"channel"`
 }
 
-// fetchFeed 抓取并解析单个数据源（带重试）；全部重试失败或解析出 0 条时返回错误
-func (s *Store) fetchFeed(ctx context.Context, feed Feed) ([]Entry, error) {
+// validator 条件请求用的校验值，取自上次成功响应的 ETag / Last-Modified
+type validator struct {
+	etag         string
+	lastModified string
+}
+
+// fetched 单个数据源一次成功抓取的结果
+type fetched struct {
+	entries     []Entry
+	validator   validator
+	notModified bool // 源返回 304：内容未变，entries 为空，调用方沿用上次数据
+}
+
+// fetchFeed 抓取并解析单个数据源（带重试）；全部重试失败或解析出 0 条时返回错误。
+// cond 非空时发起条件请求，源未变化则返回 notModified。
+func (s *Store) fetchFeed(ctx context.Context, feed Feed, cond validator) (fetched, error) {
 	client := &http.Client{Timeout: s.fetch.Timeout}
 	retries := max(s.fetch.Retries, 1)
 
@@ -39,40 +53,50 @@ func (s *Store) fetchFeed(ctx context.Context, feed Feed) ([]Entry, error) {
 			// 线性退避，可被 ctx 取消
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return fetched{}, ctx.Err()
 			case <-time.After(time.Duration(attempt) * s.fetch.RetryDelay):
 			}
 		}
 		s.stats.fetchAttempts.Add(1)
-		entries, err := s.fetchOnce(ctx, client, feed)
+		res, err := s.fetchOnce(ctx, client, feed, cond)
 		if err == nil {
 			s.stats.fetchSuccess.Add(1)
-			return entries, nil
+			return res, nil
 		}
 		lastErr = err
 		s.log.Debug("source fetch attempt failed", "source", feed.ID, "attempt", attempt+1, "of", retries, "err", err)
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return fetched{}, ctx.Err()
 		}
 	}
 	s.stats.fetchFailures.Add(1) // 所有重试失败才计一次失败
-	return nil, fmt.Errorf("after %d attempts: %w", retries, lastErr)
+	return fetched{}, fmt.Errorf("after %d attempts: %w", retries, lastErr)
 }
 
-func (s *Store) fetchOnce(ctx context.Context, client *http.Client, feed Feed) ([]Entry, error) {
+func (s *Store) fetchOnce(ctx context.Context, client *http.Client, feed Feed, cond validator) (fetched, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feed.URL, nil)
 	if err != nil {
-		return nil, err
+		return fetched{}, err
 	}
 	req.Header.Set("User-Agent", userAgent)
+	if cond.etag != "" {
+		req.Header.Set("If-None-Match", cond.etag)
+	}
+	if cond.lastModified != "" {
+		req.Header.Set("If-Modified-Since", cond.lastModified)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return fetched{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// 只有发出了条件请求，304 才有意义；否则按异常状态处理
+	if resp.StatusCode == http.StatusNotModified && cond != (validator{}) {
+		return fetched{notModified: true}, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("non-200 status code %d", resp.StatusCode)
+		return fetched{}, fmt.Errorf("non-200 status code %d", resp.StatusCode)
 	}
 
 	var entries []Entry
@@ -82,12 +106,15 @@ func (s *Store) fetchOnce(ctx context.Context, client *http.Client, feed Feed) (
 		entries, err = s.parseText(resp.Body, feed.ID)
 	}
 	if err != nil {
-		return nil, err
+		return fetched{}, err
 	}
 	if len(entries) == 0 {
-		return nil, errEmptySource
+		return fetched{}, errEmptySource
 	}
-	return entries, nil
+	return fetched{
+		entries:   entries,
+		validator: validator{etag: resp.Header.Get("ETag"), lastModified: resp.Header.Get("Last-Modified")},
+	}, nil
 }
 
 // parseLine 校验单行是否为 IP 或 CIDR，合法则返回条目并计入统计
