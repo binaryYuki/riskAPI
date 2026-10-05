@@ -1,4 +1,5 @@
-# 自托管部署用。构建前先运行 ./scripts/fetch-geo-data.sh 下载地理位置数据库。
+# 自托管部署用。地理位置数据库缺失时构建过程会自动从 Release geo-data 下载；
+# 想用源头最新版可先运行 ./scripts/fetch-geo-data.sh。
 # 可选配置（ADMIN_TOKEN、PARSE_VV_SECRET 等，见 README）写入同目录 .env 文件。
 services:
   server:

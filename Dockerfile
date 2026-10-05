@@ -13,10 +13,24 @@ RUN apk add --no-cache git
 # Copy project files
 COPY . .
 
-# 地理位置数据库不入 git，构建前需先运行 scripts/fetch-geo-data.sh
-RUN for f in maxmind/GeoLite2-Country.mmdb maxmind/GeoLite2-ASN.mmdb qqwry/qqwry.dat; do \
-      test -s "providers/$f" || { echo "missing providers/$f: run ./scripts/fetch-geo-data.sh before docker build" >&2; exit 1; }; \
-    done
+# 地理位置数据库不入 git。CI 构建前已运行 scripts/fetch-geo-data.sh；
+# 其它场景（如 Portainer 从 Git 直接构建）缺失的文件从 Release geo-data 下载并校验 SHA256
+ARG GEO_DATA_URL=https://github.com/binaryYuki/riskAPI/releases/download/geo-data
+RUN set -eu; \
+    for f in maxmind/GeoLite2-Country.mmdb maxmind/GeoLite2-ASN.mmdb qqwry/qqwry.dat \
+             ipinfo/ipinfo-asn.mmdb ipinfo/ipinfo-country.mmdb \
+             iplocate/iplocate-asn.mmdb iplocate/iplocate-country.mmdb; do \
+      test -s "providers/$f" && continue; \
+      name="${f#*/}"; \
+      [ -s /tmp/SHA256SUMS ] || wget -q -O /tmp/SHA256SUMS "$GEO_DATA_URL/SHA256SUMS"; \
+      sum="$(awk -v n="$name" '{f=$2; sub(/^\.\//, "", f)} f == n {print $1}' /tmp/SHA256SUMS)"; \
+      [ -n "$sum" ] || { echo "$name not listed in $GEO_DATA_URL/SHA256SUMS" >&2; exit 1; }; \
+      echo "downloading providers/$f"; \
+      mkdir -p "providers/${f%/*}"; \
+      wget -q -O "providers/$f" "$GEO_DATA_URL/$name"; \
+      echo "$sum  providers/$f" | sha256sum -c -s || { echo "checksum mismatch: $name" >&2; exit 1; }; \
+    done; \
+    rm -f /tmp/SHA256SUMS
 
 # Cache Go modules
 RUN --mount=type=cache,target=/go/pkg/mod \
