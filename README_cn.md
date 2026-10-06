@@ -357,6 +357,8 @@ services:
 4. 推送分支 (`git push origin feature/amazing-feature`)  
 5. 创建Pull Request
 
+本地环境准备，以及来自 fork 的 PR 上 CI 会执行哪些步骤，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ## FAQ
 
 **Q: 为什么地理位置查询结果不一致？**  

@@ -359,6 +359,8 @@ services:
 4. Push branch (`git push origin feature/amazing-feature`)
 5. Create Pull Request
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and what CI runs on pull requests from forks.
+
 ## FAQ
 
 **Q: Why are geolocation query results inconsistent?**  
