@@ -37,11 +37,12 @@ var DefaultFeeds = []Feed{
 	{ID: "firehol-level3", URL: "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level3.netset"},
 	{ID: "firehol-level4", URL: "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level4.netset"},
 	{ID: "greensnow", URL: "https://blocklist.greensnow.co/greensnow.txt"},
-	{ID: "ipsum-level8", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/8.txt"},
-	{ID: "ipsum-level7", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/7.txt"},
-	{ID: "ipsum-level6", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/6.txt"},
-	{ID: "ipsum-level5", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/5.txt"},
-	{ID: "ipsum-level4", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/4.txt"},
-	{ID: "ipsum-level3", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/3.txt"},
+	// ipsum 第 N 级 = 出现在至少 N 个黑名单中，低级别包含高级别；按升序排列使每个 IP 取到其最高级别
 	{ID: "ipsum-level2", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/2.txt"},
+	{ID: "ipsum-level3", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/3.txt"},
+	{ID: "ipsum-level4", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/4.txt"},
+	{ID: "ipsum-level5", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/5.txt"},
+	{ID: "ipsum-level6", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/6.txt"},
+	{ID: "ipsum-level7", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/7.txt"},
+	{ID: "ipsum-level8", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/8.txt"},
 }

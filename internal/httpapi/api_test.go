@@ -34,15 +34,15 @@ func TestCheckRequestIP(t *testing.T) {
 		wantBody   string
 	}{
 		{"localhost", "127.0.0.1:12345", nil, http.StatusOK,
-			`{"status":"ok","message":"Client IP is not risky (private/bogon)","ip":"127.0.0.1"}`},
+			`{"status":"ok","message":"Client IP is not risky (private/bogon)","ip":"127.0.0.1","isRisky":false}`},
 		{"invalid ip", "invalid-ip:12345", nil, http.StatusBadRequest,
 			`{"message":"Invalid or unidentifiable IP address.", "status":"error"}`},
 		{"private ip", "192.168.1.1:12345", nil, http.StatusOK,
-			`{"status":"ok","message":"Client IP is not risky (private/bogon)","ip":"192.168.1.1"}`},
+			`{"status":"ok","message":"Client IP is not risky (private/bogon)","ip":"192.168.1.1","isRisky":false}`},
 		{"risky ip", "8.8.8.8:12345", map[string]string{"8.8.8.8": "Test reason"}, http.StatusOK,
-			`{"status":"banned","message":"Test reason","ip":"8.8.8.8"}`},
+			`{"status":"banned","message":"Test reason","ip":"8.8.8.8","isRisky":true}`},
 		{"safe ip", "8.8.4.4:12345", nil, http.StatusOK,
-			`{"status":"ok","message":"IP is not listed as risky.","ip":"8.8.4.4"}`},
+			`{"status":"ok","message":"IP is not listed as risky.","ip":"8.8.4.4","isRisky":false}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -81,18 +81,18 @@ func TestCheckIP_ExactMessages(t *testing.T) {
 	env := newTestEnv(t)
 	env.setRisky(map[string]string{"9.9.9.9": "single-test"})
 	cases := map[string]string{
-		"9.9.9.9":    `{"status":"risky","message":"IP is in risky list: single-test","ip":"9.9.9.9"}`,
-		"104.16.0.1": `{"status":"cdn","message":"IP belongs to CDN: cloudflare","ip":"104.16.0.1"}`,
-		"3.5.140.1":  `{"status":"idc","message":"IP belongs to IDC: aws","ip":"3.5.140.1"}`,
-		"1.0.0.0":    `{"status":"ok","message":"IP is not risky","ip":"1.0.0.0"}`,
+		"9.9.9.9":    `{"status":"risky","message":"IP is in risky list: single-test","ip":"9.9.9.9","isRisky":true}`,
+		"104.16.0.1": `{"status":"cdn","message":"IP belongs to CDN: cloudflare","ip":"104.16.0.1","isRisky":false}`,
+		"3.5.140.1":  `{"status":"idc","message":"IP belongs to IDC: aws","ip":"3.5.140.1","isRisky":false}`,
+		"1.0.0.0":    `{"status":"ok","message":"IP is not risky","ip":"1.0.0.0","isRisky":false}`,
 	}
 	for ip, want := range cases {
 		assert.JSONEq(t, want, env.do(http.MethodGet, "/api/v1/ip/"+ip).Body.String(), ip)
 	}
 	// 客户端版本的文案不同
-	assert.JSONEq(t, `{"status":"cdn","message":"Client IP belongs to CDN: cloudflare","ip":"104.16.0.1"}`,
+	assert.JSONEq(t, `{"status":"cdn","message":"Client IP belongs to CDN: cloudflare","ip":"104.16.0.1","isRisky":false}`,
 		env.do(http.MethodGet, "/api/v1/ip", withRemote("104.16.0.1:1")).Body.String())
-	assert.JSONEq(t, `{"status":"idc","message":"Client IP belongs to IDC: aws","ip":"3.5.140.1"}`,
+	assert.JSONEq(t, `{"status":"idc","message":"Client IP belongs to IDC: aws","ip":"3.5.140.1","isRisky":false}`,
 		env.do(http.MethodGet, "/api/v1/ip", withRemote("3.5.140.1:1")).Body.String())
 }
 

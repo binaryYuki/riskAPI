@@ -3,6 +3,7 @@ package feeds
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -314,4 +315,18 @@ func TestDefaultFeeds_UniqueIDsAndURLs(t *testing.T) {
 		ids[f.ID], urls[f.URL] = true, true
 	}
 	assert.Len(t, DefaultFeeds, 24)
+}
+
+// ipsum 低级别是高级别的超集，必须升序排列，否则高级别标签会被低级别覆盖
+func TestDefaultFeeds_IpsumLevelsAscending(t *testing.T) {
+	prev := 0
+	for _, f := range DefaultFeeds {
+		var level int
+		if _, err := fmt.Sscanf(f.ID, "ipsum-level%d", &level); err != nil {
+			continue
+		}
+		assert.Greater(t, level, prev, "ipsum levels must be ascending, got %s after level %d", f.ID, prev)
+		prev = level
+	}
+	assert.Equal(t, 8, prev)
 }
