@@ -24,6 +24,7 @@ type ResponseWithIP struct {
 	Status  string `json:"status"`
 	Message any    `json:"message,omitempty"`
 	IP      string `json:"ip,omitempty"`
+	IsRisky bool   `json:"isRisky"` // 仅命中风险列表时为 true；CDN/IDC 不算
 }
 
 // handleError 返回错误响应并中止后续处理
@@ -72,8 +73,9 @@ func (s *Server) checkIP(c *gin.Context) {
 		handleError(c, http.StatusBadRequest, "Invalid IP address format")
 		return
 	}
-	resp := ResponseWithIP{IP: ip}
-	switch v := s.classify(ip); v.kind {
+	v := s.classify(ip)
+	resp := ResponseWithIP{IP: ip, IsRisky: v.kind == verdictRisky}
+	switch v.kind {
 	case verdictPrivate:
 		resp.Status, resp.Message = "ok", "IP is not risky (private/bogon)"
 	case verdictRisky:
@@ -95,8 +97,9 @@ func (s *Server) checkRequestIP(c *gin.Context) {
 		handleError(c, http.StatusBadRequest, "Invalid or unidentifiable IP address.")
 		return
 	}
-	resp := ResponseWithIP{IP: ip}
-	switch v := s.classify(ip); v.kind {
+	v := s.classify(ip)
+	resp := ResponseWithIP{IP: ip, IsRisky: v.kind == verdictRisky}
+	switch v.kind {
 	case verdictPrivate:
 		resp.Status, resp.Message = "ok", "Client IP is not risky (private/bogon)"
 	case verdictRisky:
