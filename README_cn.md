@@ -138,7 +138,8 @@ GET /api/v1/ip
 {
   "status": "risky",
   "message": "IP is in risky list: tor_exit_node",
-  "ip": "1.2.3.4"
+  "ip": "1.2.3.4",
+  "isRisky": true
 }
 ```
 
