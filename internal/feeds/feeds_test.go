@@ -174,7 +174,7 @@ func TestUpdate_LaterSourceWinsForDuplicatePrefix(t *testing.T) {
 func TestParseText_TruncatedBodyIsError(t *testing.T) {
 	s := newTestStore()
 	body := io.MultiReader(strings.NewReader("1.1.1.1\n2.2.2.2\n"), iotest.ErrReader(errors.New("connection reset")))
-	_, err := s.parseText(body, "test")
+	_, err := s.parseText(body, "test", false)
 	assert.Error(t, err)
 }
 
@@ -189,7 +189,7 @@ func entryValues(entries []Entry) []string {
 func TestParseText_Formats(t *testing.T) {
 	s := newTestStore()
 	body := strings.NewReader("# c\n; c\n\nExitAddress 1.2.3.4 2026-01-01 00:00:00\n10.0.0.0/8\nnot-an-ip\n2001:db8::1\n")
-	entries, err := s.parseText(body, "src")
+	entries, err := s.parseText(body, "src", false)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"1.2.3.4", "10.0.0.0/8", "2001:db8::1"}, entryValues(entries))
 	for _, e := range entries {
@@ -204,7 +204,7 @@ func TestParseText_InlineComments(t *testing.T) {
 			"1.10.16.0/20 ; SBL256894\n" +
 			"77.91.122.9\t\t# 2026-09-29 12:02:10\t\t26\t2855073\n" +
 			"ExitNode 0011BD2485AD45D984EC4159C88FC066E5E3300E\n")
-	entries, err := s.parseText(body, "src")
+	entries, err := s.parseText(body, "src", false)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"1.10.16.0/20", "77.91.122.9"}, entryValues(entries))
 }
@@ -314,7 +314,7 @@ func TestDefaultFeeds_UniqueIDsAndURLs(t *testing.T) {
 		assert.False(t, urls[f.URL], "duplicate url %s", f.URL)
 		ids[f.ID], urls[f.URL] = true, true
 	}
-	assert.Len(t, DefaultFeeds, 24)
+	assert.Len(t, DefaultFeeds, 32)
 }
 
 // ipsum 低级别是高级别的超集，必须升序排列，否则高级别标签会被低级别覆盖
@@ -329,4 +329,77 @@ func TestDefaultFeeds_IpsumLevelsAscending(t *testing.T) {
 		prev = level
 	}
 	assert.Equal(t, 8, prev)
+}
+
+func TestUpdate_TagsAndTagOnly(t *testing.T) {
+	vpn := textServer(func() (int, string) { return http.StatusOK, "10.1.0.0/16\n" })
+	defer vpn.Close()
+	dc := textServer(func() (int, string) { return http.StatusOK, "20.1.0.0/16\n" })
+	defer dc.Close()
+	proxies := textServer(func() (int, string) {
+		return http.StatusOK, "30.1.1.1:8080\nsocks5://30.2.2.2:1080\n[2001:db8::1]:3128\n"
+	})
+	defer proxies.Close()
+	s := NewStore([]Feed{
+		{ID: "vpn", URL: vpn.URL, Tags: TagProxy},
+		{ID: "dc", URL: dc.URL, Tags: TagIDC},
+		{ID: "pub", URL: proxies.URL, Format: FormatHostPort, Tags: TagProxy, TagOnly: true},
+	}, fastFetch, discardLog())
+	s.Update(context.Background())
+
+	assert.True(t, isRisky(s, "10.1.2.3"))
+	assert.Equal(t, TagProxy, s.Tags("10.1.2.3"))
+	assert.True(t, isRisky(s, "20.1.2.3"))
+	assert.Equal(t, TagIDC, s.Tags("20.1.2.3"))
+	for _, ip := range []string{"30.1.1.1", "30.2.2.2", "2001:db8::1"} {
+		assert.False(t, isRisky(s, ip), "tag-only feed must not enter the risk table: %s", ip)
+		assert.Equal(t, TagProxy, s.Tags(ip), ip)
+	}
+	assert.Equal(t, Tag(0), s.Tags("40.1.1.1"))
+
+	// 管理端删除同时作用于标记表
+	assert.True(t, s.Remove("30.1.1.1"))
+	assert.Equal(t, Tag(0), s.Tags("30.1.1.1"))
+}
+
+// 更新期间（源响应慢）查询必须继续使用旧数据，不能出现空窗
+func TestUpdate_ServesOldDataWhileUpdating(t *testing.T) {
+	release := make(chan struct{})
+	var slow atomic.Bool
+	srv := textServer(func() (int, string) {
+		if slow.Load() {
+			<-release
+			return http.StatusOK, "2.2.2.2\n"
+		}
+		return http.StatusOK, "1.1.1.1\n"
+	})
+	defer srv.Close()
+	s := newTestStore(srv.URL)
+	s.Update(context.Background())
+
+	slow.Store(true)
+	done := make(chan struct{})
+	go func() { s.Update(context.Background()); close(done) }()
+	for range 100 {
+		assert.True(t, isRisky(s, "1.1.1.1"), "old data must stay queryable during an update")
+		assert.True(t, s.Ready())
+	}
+	close(release)
+	<-done
+	assert.False(t, isRisky(s, "1.1.1.1"))
+	assert.True(t, isRisky(s, "2.2.2.2"))
+}
+
+func TestHostFromProxy(t *testing.T) {
+	cases := map[string]string{
+		"1.2.3.4:8080":          "1.2.3.4",
+		"http://1.2.3.4:8080":   "1.2.3.4",
+		"socks5://1.2.3.4:1080": "1.2.3.4",
+		"[2001:db8::1]:3128":    "2001:db8::1",
+		"1.2.3.4":               "1.2.3.4",
+		"2001:db8::1":           "2001:db8::1",
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, hostFromProxy(in), in)
+	}
 }

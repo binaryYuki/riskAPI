@@ -24,14 +24,33 @@ type FetchConfig struct {
 	RetryDelay time.Duration // 线性退避基数：第 n 次重试前等待 n*RetryDelay
 }
 
-// Store 维护风险前缀表。查询无锁（atomic.Pointer 发布只读表），写操作串行化。
+// tables 一次发布的全部查找表，整体原子替换以保证查询时三者一致
+type tables struct {
+	risk  *ipset.Set // 风险前缀 → 来源 ID
+	proxy *ipset.Set // 代理标记前缀 → 来源 ID
+	idc   *ipset.Set // IDC 标记前缀 → 来源 ID
+}
+
+func emptyTables() *tables {
+	return &tables{risk: ipset.New(), proxy: ipset.New(), idc: ipset.New()}
+}
+
+// batch 同一数据源的条目及其属性
+type batch struct {
+	entries []Entry
+	tags    Tag
+	tagOnly bool
+}
+
+// Store 维护风险前缀表与代理/IDC 标记表。查询无锁（atomic.Pointer 发布只读表），
+// 更新时在后台构建新表后整体替换，替换前后查询始终可用。写操作串行化。
 type Store struct {
 	feeds []Feed
 	fetch FetchConfig
 	log   *slog.Logger
 	stats Stats
 
-	set     atomic.Pointer[ipset.Set]
+	set     atomic.Pointer[tables]
 	writeMu sync.Mutex // 串行化整表替换 / 单条删除
 
 	updateMu   sync.Mutex           // 串行化 Update，保护 lastGood 与 validators
@@ -49,18 +68,31 @@ func NewStore(feeds []Feed, fetch FetchConfig, log *slog.Logger) *Store {
 		lastGood:   make(map[string][]Entry),
 		validators: make(map[string]validator),
 	}
-	s.set.Store(ipset.New())
+	s.set.Store(emptyTables())
 	return s
 }
 
-// Lookup 返回 IP 命中的来源 ID
+// Lookup 返回 IP 命中的风险来源 ID
 func (s *Store) Lookup(ip string) (source string, ok bool) {
-	return s.set.Load().Lookup(ip)
+	return s.set.Load().risk.Lookup(ip)
 }
 
-// Snapshot 返回当前只读表（用于导出与统计）
+// Tags 返回 IP 命中的属性标记（与是否命中风险表无关）
+func (s *Store) Tags(ip string) Tag {
+	t := s.set.Load()
+	var tags Tag
+	if _, ok := t.proxy.Lookup(ip); ok {
+		tags |= TagProxy
+	}
+	if _, ok := t.idc.Lookup(ip); ok {
+		tags |= TagIDC
+	}
+	return tags
+}
+
+// Snapshot 返回当前只读风险表（用于导出与统计）
 func (s *Store) Snapshot() *ipset.Set {
-	return s.set.Load()
+	return s.set.Load().risk
 }
 
 // Ready 首轮数据是否已加载
@@ -73,40 +105,59 @@ func (s *Store) Stats() StatsSnapshot {
 	return s.stats.Snapshot()
 }
 
-// Replace 由条目构建新表并整体替换；同一前缀后出现的条目覆盖先出现的
+// Replace 由条目构建新风险表（不带标记）并整体替换；同一前缀后出现的条目覆盖先出现的
 func (s *Store) Replace(entries []Entry) {
-	next := ipset.New()
+	s.replace([]batch{{entries: entries}})
+}
+
+func (s *Store) replace(batches []batch) {
+	next := emptyTables()
 	singleIPs, cidrs := 0, 0
-	for _, e := range entries {
-		if !next.Insert(e.Value, e.Source) {
-			continue
-		}
-		if strings.Contains(e.Value, "/") {
-			cidrs++
-		} else {
-			singleIPs++
+	for _, b := range batches {
+		for _, e := range b.entries {
+			if !b.tagOnly {
+				if !next.risk.Insert(e.Value, e.Source) {
+					continue
+				}
+				if strings.Contains(e.Value, "/") {
+					cidrs++
+				} else {
+					singleIPs++
+				}
+			}
+			if b.tags&TagProxy != 0 {
+				next.proxy.Insert(e.Value, e.Source)
+			}
+			if b.tags&TagIDC != 0 {
+				next.idc.Insert(e.Value, e.Source)
+			}
 		}
 	}
 	s.writeMu.Lock()
 	s.set.Store(next)
 	s.writeMu.Unlock()
-	s.log.Info("risk list updated", "single_ips", singleIPs, "cidrs", cidrs, "unique_prefixes", next.Len())
+	s.log.Info("risk list updated", "single_ips", singleIPs, "cidrs", cidrs, "unique_prefixes", next.risk.Len(),
+		"proxy_prefixes", next.proxy.Len(), "idc_prefixes", next.idc.Len())
 }
 
-// Clear 清空风险表
+// Clear 清空风险表与标记表
 func (s *Store) Clear() {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	s.set.Store(ipset.New())
+	s.set.Store(emptyTables())
 }
 
-// Remove 删除单个 IP 或 CIDR（写时复制后整体替换），返回是否删除成功
+// Remove 从风险表与标记表中删除单个 IP 或 CIDR（写时复制后整体替换），返回是否有表删除成功
 func (s *Store) Remove(entry string) bool {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	next, removed := s.set.Load().Without(entry)
+	cur := s.set.Load()
+	risk, r1 := cur.risk.Without(entry)
+	proxy, r2 := cur.proxy.Without(entry)
+	idc, r3 := cur.idc.Without(entry)
+	removed := r1 || r2 || r3
 	if removed {
-		s.set.Store(next)
+		s.set.Store(&tables{risk: risk, proxy: proxy, idc: idc})
 	}
 	return removed
 }
@@ -125,8 +176,8 @@ func (s *Store) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Update 并发抓取全部数据源，未变化（304）或失败的源沿用上次成功的数据，再整体替换风险表。
-// 即使所有源都未变化也会重建，保证 Clear / Remove 之后的表能在下一轮恢复。
+// Update 并发抓取全部数据源，失败的源沿用上次成功的数据，再整体替换风险表。
+// 抓取与构建期间查询继续使用旧表。
 func (s *Store) Update(ctx context.Context) {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
@@ -161,8 +212,8 @@ func (s *Store) Update(ctx context.Context) {
 	}
 
 	// 按配置顺序合并，保证同一前缀出现在多个源时标签确定
-	var merged []Entry
-	fresh, unchanged, stale, missing := 0, 0, 0, 0
+	var batches []batch
+	fresh, stale, missing, total := 0, 0, 0, 0
 	for i, r := range results {
 		feed := s.feeds[i]
 		switch {
@@ -180,14 +231,15 @@ func (s *Store) Update(ctx context.Context) {
 			missing++
 			continue
 		}
-		merged = append(merged, s.lastGood[feed.ID]...)
+		batches = append(batches, batch{entries: s.lastGood[feed.ID], tags: feed.Tags, tagOnly: feed.TagOnly})
+		total += len(s.lastGood[feed.ID])
 	}
-	s.log.Info("risk list sources", "fresh", fresh, "unchanged", unchanged, "stale", stale, "unavailable", missing, "entries", len(merged))
+	s.log.Info("risk list sources", "fresh", fresh, "stale", stale, "unavailable", missing, "entries", total)
 
 	if fresh+unchanged+stale == 0 {
 		s.log.Warn("no data obtained from any source, risk list not updated")
 		return
 	}
-	s.Replace(merged)
+	s.replace(batches)
 	s.ready.Store(true)
 }

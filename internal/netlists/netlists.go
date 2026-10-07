@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -16,7 +17,14 @@ import (
 var (
 	CDNProviders = []string{"edgeone", "cloudflare", "fastly"}
 	IDCProviders = []string{"aws", "azure", "gcp", "akamai", "apple", "digitalocean", "linode", "oracle", "zscaler"}
+	// ProxyProviders IDC 中实为代理/中继出口的提供商（apple.txt 即 iCloud Private Relay 出口段）
+	ProxyProviders = []string{"apple"}
 )
+
+// IsProxyProvider 该 IDC 提供商的网段是否为代理/中继出口
+func IsProxyProvider(provider string) bool {
+	return slices.Contains(ProxyProviders, provider)
+}
 
 // Lists CDN/IDC 查找表。数据来自 <dataDir>/cdn、<dataDir>/idc 下的 <provider>.txt，
 // 随镜像发布、运行期不变；Reload 构建新表后原子替换，查询无锁。

@@ -146,9 +146,13 @@ GET /api/v1/ip
   "status": "risky",
   "message": "IP is in risky list: tor_exit_node",
   "ip": "1.2.3.4",
-  "isRisky": true
+  "isRisky": true,
+  "isIdc": false,
+  "isProxy": true
 }
 ```
+
+`isRisky` is true only for risk-list hits. `isIdc` / `isProxy` are independent flags: `isIdc` covers data/idc cloud ranges and datacenter feeds; `isProxy` covers VPN/Tor/iCloud Private Relay and public proxy lists (public proxies only set the flag, they do not make an IP risky).
 
 ### 2. Geolocation Query (New Feature)
 ```bash
@@ -288,6 +292,8 @@ POST /api/cache/flush/{method}/{range}
 - X4BNet VPN/datacenter IP lists
 - Project Honeypot malicious IPs
 - Dan.me.uk Tor lists
+- Spamhaus DROP (IPv4 + IPv6), AbuseIPDB (confidence 100, 30d mirror), Binary Defense, StopForumSpam toxic CIDRs
+- Public proxy lists (monosans, TheSpeedX), flag-only (`isProxy`)
 - Other open-source threat intelligence sources
 
 ### Geolocation Data Sources

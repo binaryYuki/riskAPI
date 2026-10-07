@@ -144,9 +144,13 @@ GET /api/v1/ip
   "status": "risky",
   "message": "IP is in risky list: tor_exit_node",
   "ip": "1.2.3.4",
-  "isRisky": true
+  "isRisky": true,
+  "isIdc": false,
+  "isProxy": true
 }
 ```
+
+`isRisky` 仅在命中风险列表时为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
 
 ### 2. 地理位置查询 (新功能)
 ```bash
@@ -286,6 +290,8 @@ POST /api/cache/flush/{method}/{range}
 - X4BNet VPN/数据中心IP列表
 - Project Honeypot恶意IP
 - Dan.me.uk Tor列表
+- Spamhaus DROP（IPv4 + IPv6）、AbuseIPDB（置信度 100、30 天镜像）、Binary Defense、StopForumSpam 滥用网段
+- 公开代理列表（monosans、TheSpeedX），仅标记 `isProxy`
 - 其他开源威胁情报源
 
 ### 地理位置数据源

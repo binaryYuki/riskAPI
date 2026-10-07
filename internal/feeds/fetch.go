@@ -103,7 +103,7 @@ func (s *Store) fetchOnce(ctx context.Context, client *http.Client, feed Feed, c
 	if feed.Format == FormatRSS {
 		entries, err = s.parseRSS(resp.Body, feed.ID)
 	} else {
-		entries, err = s.parseText(resp.Body, feed.ID)
+		entries, err = s.parseText(resp.Body, feed.ID, feed.Format == FormatHostPort)
 	}
 	if err != nil {
 		return fetched{}, err
@@ -156,7 +156,9 @@ func (s *Store) parseRSS(body io.Reader, source string) ([]Entry, error) {
 //	Spamhaus DROP: "1.10.16.0/20 ; SBL256894"
 //	BruteForceBlocker: "77.91.122.9\t\t# 2026-09-29 12:02:10\t\t26\t2855073"
 //	Tor exit-addresses: "ExitAddress 1.2.3.4 2026-01-01 00:00:00"
-func (s *Store) parseText(body io.Reader, source string) ([]Entry, error) {
+//
+// hostPort 为 true 时（FormatHostPort）第一个字段视为代理地址，去掉协议与端口后取 IP。
+func (s *Store) parseText(body io.Reader, source string, hostPort bool) ([]Entry, error) {
 	var entries []Entry
 	scanner := bufio.NewScanner(body)
 	for scanner.Scan() {
@@ -172,6 +174,9 @@ func (s *Store) parseText(body io.Reader, source string) ([]Entry, error) {
 		if line == "ExitAddress" && len(fields) >= 2 {
 			line = fields[1]
 		}
+		if hostPort {
+			line = hostFromProxy(line)
+		}
 		if e, ok := s.parseLine(line, source); ok {
 			entries = append(entries, e)
 		}
@@ -181,4 +186,15 @@ func (s *Store) parseText(body io.Reader, source string) ([]Entry, error) {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	return entries, nil
+}
+
+// hostFromProxy 从 "scheme://ip:port"、"[v6]:port"、"ip:port" 中取出主机部分；无端口时原样返回
+func hostFromProxy(addr string) string {
+	if _, rest, ok := strings.Cut(addr, "://"); ok {
+		addr = rest
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
 }
