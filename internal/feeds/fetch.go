@@ -9,8 +9,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
+
+	"risky_ip_filter/internal/ipset"
 )
 
 const userAgent = "RiskyIPFilterBot/1.0 (compatible; Mozilla/5.0)"
@@ -34,11 +37,25 @@ type validator struct {
 	lastModified string
 }
 
+// feedData 单个数据源一次成功抓取的全部结果。发布后只读，更新时整体替换，
+// 因此前缀、计数与校验值始终来自同一次响应。
+type feedData struct {
+	prefixes  []netip.Prefix
+	cidrs     int       // prefixes 中源里写成 CIDR 形式的条数，其余为单 IP
+	validator validator // 该次响应的校验值，下次抓取时用于条件请求
+}
+
+func (d *feedData) add(p netip.Prefix, cidr bool) {
+	d.prefixes = append(d.prefixes, p)
+	if cidr {
+		d.cidrs++
+	}
+}
+
 // fetched 单个数据源一次成功抓取的结果
 type fetched struct {
-	entries     []Entry
-	validator   validator
-	notModified bool // 源返回 304：内容未变，entries 为空，调用方沿用上次数据
+	data        *feedData
+	notModified bool // 源返回 304：内容未变，data 为 nil，调用方沿用上次数据
 }
 
 // fetchFeed 抓取并解析单个数据源（带重试）；全部重试失败或解析出 0 条时返回错误。
@@ -99,36 +116,42 @@ func (s *Store) fetchOnce(ctx context.Context, client *http.Client, feed Feed, c
 		return fetched{}, fmt.Errorf("non-200 status code %d", resp.StatusCode)
 	}
 
-	var entries []Entry
+	var data *feedData
 	if feed.Format == FormatRSS {
-		entries, err = s.parseRSS(resp.Body, feed.ID)
+		data, err = s.parseRSS(resp.Body)
 	} else {
-		entries, err = s.parseText(resp.Body, feed.ID, feed.Format == FormatHostPort)
+		data, err = s.parseText(resp.Body, feed.Format == FormatHostPort)
 	}
 	if err != nil {
 		return fetched{}, err
 	}
-	if len(entries) == 0 {
+	if len(data.prefixes) == 0 {
 		return fetched{}, errEmptySource
 	}
-	return fetched{
-		entries:   entries,
-		validator: validator{etag: resp.Header.Get("ETag"), lastModified: resp.Header.Get("Last-Modified")},
-	}, nil
+	data.validator = validator{etag: resp.Header.Get("ETag"), lastModified: resp.Header.Get("Last-Modified")}
+	return fetched{data: data}, nil
 }
 
-// parseLine 校验单行是否为 IP 或 CIDR，合法则返回条目并计入统计
-func (s *Store) parseLine(line, source string) (Entry, bool) {
+// parseLine 将单行解析为规范化前缀，合法则追加到 d 并计入统计。
+// 全链路只在此处解析一次：解析成功即为合法，统计与后续建表都直接使用解析结果。
+func (s *Store) parseLine(line string, d *feedData) {
 	s.stats.totalLines.Add(1)
-	if _, _, err := net.ParseCIDR(line); err != nil && net.ParseIP(line) == nil {
-		return Entry{}, false
+	// 带 zone 的地址（fe80::1%eth0）不是可路由的公网地址，不接受
+	if strings.Contains(line, "%") {
+		return
 	}
-	s.stats.classify(line)
-	return Entry{Value: line, Source: source}, true
+	p, ok := ipset.ParseEntry(line)
+	if !ok {
+		return
+	}
+	// 解析后 "1.2.3.4" 与 "1.2.3.4/32" 是同一个前缀，写法只能在这里区分
+	cidr := strings.Contains(line, "/")
+	s.stats.classify(p, cidr)
+	d.add(p, cidr)
 }
 
 // parseRSS Project Honey Pot 的 IP 位于 <title>，格式为 "1.2.3.4 | SD"；<description> 只有事件描述
-func (s *Store) parseRSS(body io.Reader, source string) ([]Entry, error) {
+func (s *Store) parseRSS(body io.Reader) (*feedData, error) {
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return nil, fmt.Errorf("read RSS body: %w", err)
@@ -138,17 +161,15 @@ func (s *Store) parseRSS(body io.Reader, source string) ([]Entry, error) {
 		return nil, fmt.Errorf("parse RSS XML: %w", err)
 	}
 
-	var entries []Entry
+	d := &feedData{}
 	for _, item := range feed.Channel.Items {
 		ip, _, _ := strings.Cut(item.Title, "|")
 		if ip = strings.TrimSpace(ip); ip == "" {
 			continue
 		}
-		if e, ok := s.parseLine(ip, source); ok {
-			entries = append(entries, e)
-		}
+		s.parseLine(ip, d)
 	}
-	return entries, nil
+	return d, nil
 }
 
 // parseText 解析纯文本列表：去掉行内注释后取第一个字段，兼容以下格式：
@@ -158,8 +179,8 @@ func (s *Store) parseRSS(body io.Reader, source string) ([]Entry, error) {
 //	Tor exit-addresses: "ExitAddress 1.2.3.4 2026-01-01 00:00:00"
 //
 // hostPort 为 true 时（FormatHostPort）第一个字段视为代理地址，去掉协议与端口后取 IP。
-func (s *Store) parseText(body io.Reader, source string, hostPort bool) ([]Entry, error) {
-	var entries []Entry
+func (s *Store) parseText(body io.Reader, hostPort bool) (*feedData, error) {
+	d := &feedData{}
 	scanner := bufio.NewScanner(body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -177,15 +198,13 @@ func (s *Store) parseText(body io.Reader, source string, hostPort bool) ([]Entry
 		if hostPort {
 			line = hostFromProxy(line)
 		}
-		if e, ok := s.parseLine(line, source); ok {
-			entries = append(entries, e)
-		}
+		s.parseLine(line, d)
 	}
 	// 读取中断（连接断开、超时）视为失败，避免用截断的数据替换上次的完整数据
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
-	return entries, nil
+	return d, nil
 }
 
 // hostFromProxy 从 "scheme://ip:port"、"[v6]:port"、"ip:port" 中取出主机部分；无端口时原样返回

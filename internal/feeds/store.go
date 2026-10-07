@@ -11,7 +11,7 @@ import (
 	"risky_ip_filter/internal/ipset"
 )
 
-// Entry 数据源中的一条 IP/CIDR 及其来源 ID
+// Entry 一条 IP/CIDR 及其来源 ID，作为 Replace 的输入；抓取链路内部使用 feedData
 type Entry struct {
 	Value  string
 	Source string
@@ -35,9 +35,10 @@ func emptyTables() *tables {
 	return &tables{risk: ipset.New(), proxy: ipset.New(), idc: ipset.New()}
 }
 
-// batch 同一数据源的条目及其属性
+// batch 同一数据源的数据及其属性
 type batch struct {
-	entries []Entry
+	source  string
+	data    *feedData
 	tags    Tag
 	tagOnly bool
 }
@@ -53,20 +54,18 @@ type Store struct {
 	set     atomic.Pointer[tables]
 	writeMu sync.Mutex // 串行化整表替换 / 单条删除
 
-	updateMu   sync.Mutex           // 串行化 Update，保护 lastGood 与 validators
-	lastGood   map[string][]Entry   // 每个源最近一次成功的条目（Feed.ID → entries）
-	validators map[string]validator // lastGood 对应响应的校验值，与 lastGood 同步更新
-	ready      atomic.Bool          // 首轮更新完成且至少一个源可用
+	updateMu sync.Mutex           // 串行化 Update，保护 lastGood
+	lastGood map[string]*feedData // 每个源最近一次成功抓取的结果（Feed.ID → data）
+	ready    atomic.Bool          // 首轮更新完成且至少一个源可用
 }
 
 // NewStore 创建空的风险表
 func NewStore(feeds []Feed, fetch FetchConfig, log *slog.Logger) *Store {
 	s := &Store{
-		feeds:      feeds,
-		fetch:      fetch,
-		log:        log,
-		lastGood:   make(map[string][]Entry),
-		validators: make(map[string]validator),
+		feeds:    feeds,
+		fetch:    fetch,
+		log:      log,
+		lastGood: make(map[string]*feedData),
 	}
 	s.set.Store(emptyTables())
 	return s
@@ -107,29 +106,38 @@ func (s *Store) Stats() StatsSnapshot {
 
 // Replace 由条目构建新风险表（不带标记）并整体替换；同一前缀后出现的条目覆盖先出现的
 func (s *Store) Replace(entries []Entry) {
-	s.replace([]batch{{entries: entries}})
+	// 相邻的同来源条目并入同一批，顺序不变，覆盖规则与逐条写入一致
+	var batches []batch
+	for _, e := range entries {
+		p, ok := ipset.ParseEntry(e.Value)
+		if !ok {
+			continue
+		}
+		if n := len(batches); n == 0 || batches[n-1].source != e.Source {
+			batches = append(batches, batch{source: e.Source, data: &feedData{}})
+		}
+		batches[len(batches)-1].data.add(p, strings.Contains(e.Value, "/"))
+	}
+	s.replace(batches)
 }
 
 func (s *Store) replace(batches []batch) {
 	next := emptyTables()
 	singleIPs, cidrs := 0, 0
 	for _, b := range batches {
-		for _, e := range b.entries {
+		if !b.tagOnly {
+			cidrs += b.data.cidrs
+			singleIPs += len(b.data.prefixes) - b.data.cidrs
+		}
+		for _, p := range b.data.prefixes {
 			if !b.tagOnly {
-				if !next.risk.Insert(e.Value, e.Source) {
-					continue
-				}
-				if strings.Contains(e.Value, "/") {
-					cidrs++
-				} else {
-					singleIPs++
-				}
+				next.risk.InsertPrefix(p, b.source)
 			}
 			if b.tags&TagProxy != 0 {
-				next.proxy.Insert(e.Value, e.Source)
+				next.proxy.InsertPrefix(p, b.source)
 			}
 			if b.tags&TagIDC != 0 {
-				next.idc.Insert(e.Value, e.Source)
+				next.idc.InsertPrefix(p, b.source)
 			}
 		}
 	}
@@ -195,8 +203,8 @@ func (s *Store) Update(ctx context.Context) {
 	for i, feed := range s.feeds {
 		// 只有手里有上次的数据才发条件请求，否则 304 时无数据可用
 		var cond validator
-		if s.lastGood[feed.ID] != nil {
-			cond = s.validators[feed.ID]
+		if last := s.lastGood[feed.ID]; last != nil {
+			cond = last.validator
 		}
 		wg.Add(1)
 		go func() {
@@ -221,19 +229,19 @@ func (s *Store) Update(ctx context.Context) {
 		case r.err == nil && r.notModified:
 			unchanged++
 		case r.err == nil:
-			s.lastGood[feed.ID] = r.entries
-			s.validators[feed.ID] = r.validator
+			s.lastGood[feed.ID] = r.data
 			fresh++
 		case s.lastGood[feed.ID] != nil:
-			s.log.Warn("source failed, reusing last successful data", "source", feed.ID, "err", r.err, "entries", len(s.lastGood[feed.ID]))
+			s.log.Warn("source failed, reusing last successful data", "source", feed.ID, "err", r.err, "entries", len(s.lastGood[feed.ID].prefixes))
 			stale++
 		default:
 			s.log.Warn("source failed with no previous data", "source", feed.ID, "err", r.err)
 			missing++
 			continue
 		}
-		batches = append(batches, batch{entries: s.lastGood[feed.ID], tags: feed.Tags, tagOnly: feed.TagOnly})
-		total += len(s.lastGood[feed.ID])
+		data := s.lastGood[feed.ID]
+		batches = append(batches, batch{source: feed.ID, data: data, tags: feed.Tags, tagOnly: feed.TagOnly})
+		total += len(data.prefixes)
 	}
 	s.log.Info("risk list sources", "fresh", fresh, "unchanged", unchanged, "stale", stale, "unavailable", missing, "entries", total)
 

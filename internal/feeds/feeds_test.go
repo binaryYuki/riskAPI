@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +18,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"risky_ip_filter/internal/ipset"
 )
 
 var fastFetch = FetchConfig{Timeout: 2 * time.Second, Retries: 2, RetryDelay: time.Millisecond}
@@ -174,27 +178,134 @@ func TestUpdate_LaterSourceWinsForDuplicatePrefix(t *testing.T) {
 func TestParseText_TruncatedBodyIsError(t *testing.T) {
 	s := newTestStore()
 	body := io.MultiReader(strings.NewReader("1.1.1.1\n2.2.2.2\n"), iotest.ErrReader(errors.New("connection reset")))
-	_, err := s.parseText(body, "test", false)
+	_, err := s.parseText(body, false)
 	assert.Error(t, err)
 }
 
-func entryValues(entries []Entry) []string {
+// entryValues 还原为数据源里的写法：单 IP 不带掩码
+func entryValues(d *feedData) []string {
 	var got []string
-	for _, e := range entries {
-		got = append(got, e.Value)
+	for _, p := range d.prefixes {
+		if p.IsSingleIP() {
+			got = append(got, p.Addr().String())
+		} else {
+			got = append(got, p.String())
+		}
 	}
 	return got
+}
+
+// 来源标签在 Update 合并时按 Feed.ID 贴上，文本源与 RSS 源都应如此
+func TestUpdate_SourceLabelPerFeed(t *testing.T) {
+	text := textServer(func() (int, string) { return http.StatusOK, "5.5.5.0/24\n6.6.6.6\n" })
+	defer text.Close()
+	rss := textServer(func() (int, string) {
+		return http.StatusOK, `<rss version="2.0"><channel><item><title>7.7.7.7 | SD</title></item></channel></rss>`
+	})
+	defer rss.Close()
+	s := NewStore([]Feed{
+		{ID: "text-feed", URL: text.URL},
+		{ID: "rss-feed", URL: rss.URL, Format: FormatRSS},
+	}, fastFetch, discardLog())
+
+	s.Update(context.Background())
+	for ip, want := range map[string]string{"5.5.5.9": "text-feed", "6.6.6.6": "text-feed", "7.7.7.7": "rss-feed"} {
+		source, ok := s.Lookup(ip)
+		assert.True(t, ok, ip)
+		assert.Equal(t, want, source, ip)
+	}
+}
+
+// Replace 把相邻的同来源条目并成一批，但标签与覆盖规则必须与逐条写入一致
+func TestReplace_GroupsBySourceKeepingOrder(t *testing.T) {
+	s := newTestStore()
+	s.Replace([]Entry{
+		{Value: "1.1.1.1", Source: "a"},
+		{Value: "2.2.2.0/24", Source: "a"},
+		{Value: "garbage", Source: "a"},
+		{Value: "1.1.1.1", Source: "b"},
+		{Value: "3.3.3.3", Source: "a"},
+	})
+	for ip, want := range map[string]string{"1.1.1.1": "b", "2.2.2.9": "a", "3.3.3.3": "a"} {
+		source, ok := s.Lookup(ip)
+		assert.True(t, ok, ip)
+		assert.Equal(t, want, source, ip)
+	}
+	assert.Equal(t, 3, s.Snapshot().Len())
+}
+
+// "1.2.3.4" 与 "1.2.3.4/32" 解析成同一个前缀，但统计仍按源里的写法区分单 IP 与 CIDR
+func TestParseText_SingleIPWrittenAsCIDRCountsAsCIDR(t *testing.T) {
+	s := newTestStore()
+	d, err := s.parseText(strings.NewReader("1.2.3.4\n5.6.7.8/32\n2001:db8::1/128\n9.9.0.0/16\n"), false)
+	assert.NoError(t, err)
+	assert.Len(t, d.prefixes, 4)
+	assert.Equal(t, 3, d.cidrs)
+	snap := s.stats.Snapshot()
+	assert.Equal(t, 1, snap.ParsedIPs)
+	assert.Equal(t, 3, snap.ParsedCIDRs)
+}
+
+// legacyAccepts 重构前一行最终能否进表：先过 net 包校验，再由 ipset 解析写入
+func legacyAccepts(line string) (netip.Prefix, bool) {
+	if _, _, err := net.ParseCIDR(line); err != nil && net.ParseIP(line) == nil {
+		return netip.Prefix{}, false
+	}
+	return ipset.ParseEntry(line)
+}
+
+func checkMatchesLegacy(t *testing.T, line string) {
+	t.Helper()
+	d := &feedData{}
+	newTestStore().parseLine(line, d)
+	want, wantOK := legacyAccepts(line)
+	if !wantOK {
+		assert.Empty(t, d.prefixes, "line %q was rejected before and must still be rejected", line)
+		return
+	}
+	if assert.Len(t, d.prefixes, 1, "line %q was accepted before and must still be accepted", line) {
+		assert.Equal(t, want, d.prefixes[0], line)
+	}
+}
+
+// 只解析一次之后，接受哪些行、得到哪个前缀，必须与重构前的"校验 + 写入"两步一致
+func TestParseLine_MatchesLegacyValidation(t *testing.T) {
+	for _, line := range parseLineCorpus {
+		checkMatchesLegacy(t, line)
+	}
+}
+
+var parseLineCorpus = []string{
+	"1.2.3.4", "1.2.3.4/32", "1.2.3.0/24", "1.2.3.4/24", "0.0.0.0/0", "255.255.255.255",
+	"1.2.3", "1.2.3.4.5", "256.1.1.1", "01.2.3.4", "1.2.3.4/33", "1.2.3.4/", "1.2.3.4/08", "1.2.3.4/+8", "/24",
+	"2001:db8::1", "2001:db8::/32", "2001:db8::1/128", "2001:db8::1/129", "::", "::/0", "::1",
+	"2001:DB8::1", "2001:db8:0:0:0:0:0:1", "2001:db8::1::2", "[2001:db8::1]",
+	"::ffff:1.2.3.4", "::ffff:1.2.3.0/120", "::ffff:1.2.3.0/96", "::ffff:1.2.3.0/64", "::1.2.3.4",
+	"fe80::1%eth0", "fe80::1%eth0/64", "fe80::/10%eth0", "1.2.3.4%eth0",
+	"", "garbage", "<html>", "1.2.3.4:8080", "http://1.2.3.4", "1.2.3.4-1.2.3.9", "0x1.2.3.4", "１.2.3.4",
+}
+
+// go test -fuzz=FuzzParseLine_MatchesLegacyValidation ./internal/feeds
+func FuzzParseLine_MatchesLegacyValidation(f *testing.F) {
+	for _, line := range parseLineCorpus {
+		f.Add(line)
+	}
+	f.Fuzz(func(t *testing.T, line string) {
+		// 调用方（parseText 取 Fields、parseRSS 做 TrimSpace）保证行首尾没有空白
+		if strings.TrimSpace(line) != line {
+			t.Skip()
+		}
+		checkMatchesLegacy(t, line)
+	})
 }
 
 func TestParseText_Formats(t *testing.T) {
 	s := newTestStore()
 	body := strings.NewReader("# c\n; c\n\nExitAddress 1.2.3.4 2026-01-01 00:00:00\n10.0.0.0/8\nnot-an-ip\n2001:db8::1\n")
-	entries, err := s.parseText(body, "src", false)
+	entries, err := s.parseText(body, false)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"1.2.3.4", "10.0.0.0/8", "2001:db8::1"}, entryValues(entries))
-	for _, e := range entries {
-		assert.Equal(t, "src", e.Source)
-	}
+	assert.Equal(t, 1, entries.cidrs)
 }
 
 func TestParseText_InlineComments(t *testing.T) {
@@ -204,7 +315,7 @@ func TestParseText_InlineComments(t *testing.T) {
 			"1.10.16.0/20 ; SBL256894\n" +
 			"77.91.122.9\t\t# 2026-09-29 12:02:10\t\t26\t2855073\n" +
 			"ExitNode 0011BD2485AD45D984EC4159C88FC066E5E3300E\n")
-	entries, err := s.parseText(body, "src", false)
+	entries, err := s.parseText(body, false)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"1.10.16.0/20", "77.91.122.9"}, entryValues(entries))
 }
@@ -216,17 +327,18 @@ func TestParseRSS_IPFromTitle(t *testing.T) {
 <item><title>2001:db8::5 | H</title><description>x</description></item>
 <item><title>garbage | SD</title><description>y</description></item>
 </channel></rss>`)
-	entries, err := s.parseRSS(body, "honeypot")
+	entries, err := s.parseRSS(body)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"34.178.149.189", "2001:db8::5"}, entryValues(entries))
 }
 
 func TestStats_Classify(t *testing.T) {
 	var st Stats
-	st.classify("1.2.3.4")
-	st.classify("1.2.3.0/24")
-	st.classify("2002::/16")
-	st.classify("garbage")
+	for _, e := range []string{"1.2.3.4", "1.2.3.0/24", "2002::/16"} {
+		p, ok := ipset.ParseEntry(e)
+		assert.True(t, ok, e)
+		st.classify(p, strings.Contains(e, "/"))
+	}
 	snap := st.Snapshot()
 	assert.Equal(t, 1, snap.ParsedIPs)
 	assert.Equal(t, 2, snap.ParsedCIDRs)
