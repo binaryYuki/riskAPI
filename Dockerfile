@@ -14,7 +14,9 @@ RUN apk add --no-cache git
 COPY . .
 
 # 地理位置数据库不入 git。CI 构建前已运行 scripts/fetch-geo-data.sh；
-# 其它场景（如 Portainer 从 Git 直接构建）缺失的文件从 Release geo-data 下载并校验 SHA256
+# 其它场景（如 Portainer 从 Git 直接构建）缺失的文件从 Release geo-data 下载并校验 SHA256。
+# 每个文件最多尝试 5 次（间隔递增，共约 50s）：覆盖网络抖动，以及 CI 正在 --clobber 覆盖
+# Release 时的短暂 404 / 新旧文件与 SHA256SUMS 不一致。每次重试都重新获取 SHA256SUMS。
 ARG GEO_DATA_URL=https://github.com/binaryYuki/riskAPI/releases/download/geo-data
 RUN set -eu; \
     for f in maxmind/GeoLite2-Country.mmdb maxmind/GeoLite2-ASN.mmdb qqwry/qqwry.dat \
@@ -22,13 +24,24 @@ RUN set -eu; \
              iplocate/iplocate-asn.mmdb iplocate/iplocate-country.mmdb; do \
       test -s "providers/$f" && continue; \
       name="${f#*/}"; \
-      [ -s /tmp/SHA256SUMS ] || wget -q -O /tmp/SHA256SUMS "$GEO_DATA_URL/SHA256SUMS"; \
-      sum="$(awk -v n="$name" '{f=$2; sub(/^\.\//, "", f)} f == n {print $1}' /tmp/SHA256SUMS)"; \
-      [ -n "$sum" ] || { echo "$name not listed in $GEO_DATA_URL/SHA256SUMS" >&2; exit 1; }; \
-      echo "downloading providers/$f"; \
       mkdir -p "providers/${f%/*}"; \
-      wget -q -O "providers/$f" "$GEO_DATA_URL/$name"; \
-      echo "$sum  providers/$f" | sha256sum -c -s || { echo "checksum mismatch: $name" >&2; exit 1; }; \
+      ok=0; \
+      for attempt in 1 2 3 4 5; do \
+        echo "downloading providers/$f (attempt $attempt)"; \
+        if ! wget -q -T 60 -O /tmp/SHA256SUMS "$GEO_DATA_URL/SHA256SUMS"; then \
+          echo "  cannot fetch $GEO_DATA_URL/SHA256SUMS" >&2; \
+        elif ! sum="$(awk -v n="$name" '{f=$2; sub(/^\.\//, "", f)} f == n {print $1}' /tmp/SHA256SUMS)" || [ -z "$sum" ]; then \
+          echo "  $name not listed in SHA256SUMS" >&2; \
+        elif ! wget -q -T 120 -O "providers/$f" "$GEO_DATA_URL/$name"; then \
+          echo "  cannot fetch $GEO_DATA_URL/$name" >&2; \
+        elif ! echo "$sum  providers/$f" | sha256sum -c -s; then \
+          echo "  checksum mismatch: $name" >&2; \
+        else \
+          ok=1; break; \
+        fi; \
+        if [ "$attempt" -lt 5 ]; then sleep $((attempt * 5)); fi; \
+      done; \
+      [ "$ok" = 1 ] || { echo "giving up on $name after 5 attempts" >&2; exit 1; }; \
     done; \
     rm -f /tmp/SHA256SUMS
 

@@ -109,7 +109,17 @@ jobs:
           find providers -type f \( -name '*.mmdb' -o -name 'qqwry.dat' \) -exec cp {} "$stage/" \;
           cd "$stage"
           sha256sum ./*.mmdb qqwry.dat > SHA256SUMS
-          gh release upload geo-data ./* --clobber --repo "$GITHUB_REPOSITORY"
+          # 数据未变化时不上传：--clobber 是逐个先删后传，覆盖期间正在构建的
+          # Portainer（Dockerfile 从此 Release 下载）会遇到 404 或校验不一致
+          prev="$(mktemp -d)"
+          if gh release download geo-data --pattern SHA256SUMS --dir "$prev" --repo "$GITHUB_REPOSITORY" \
+            && cmp -s SHA256SUMS "$prev/SHA256SUMS"; then
+            echo "geo data unchanged, skipping release upload"
+            exit 0
+          fi
+          # 数据文件先传、SHA256SUMS 最后传，缩短新旧不一致的窗口（Dockerfile 会重试）
+          gh release upload geo-data ./*.mmdb qqwry.dat --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload geo-data SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
 
       # 触发 Portainer stack webhook：Portainer 从 Git 拉取并重新构建部署
       - name: Redeploy via Portainer webhook
