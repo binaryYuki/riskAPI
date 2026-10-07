@@ -56,8 +56,10 @@ func (s *Server) requestLogger() gin.HandlerFunc {
 			return
 		}
 		start := time.Now()
+		s.annotateSpan(c)
 		c.Next()
-		s.log.Info("request",
+		// 带 ctx 记录，开启追踪时日志自动关联 trace_id / span_id
+		s.log.InfoContext(c.Request.Context(), "request",
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,
 			"status", c.Writer.Status(),

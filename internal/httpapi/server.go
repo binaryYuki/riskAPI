@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 
 	"risky_ip_filter/internal/cache"
 	"risky_ip_filter/internal/config"
@@ -32,6 +33,8 @@ type Deps struct {
 	Trap      *honeytrap.Trap
 	// ParseClient 转发 /api/v1/parse 使用的 HTTP 客户端；为 nil 时使用 30s 超时的默认客户端
 	ParseClient *http.Client
+	// TracerProvider 非 nil 时为入站请求创建 span（OPENTELEMETRY=1）
+	TracerProvider trace.TracerProvider
 }
 
 // Server 持有全部依赖，处理函数为其方法
@@ -48,6 +51,7 @@ type Server struct {
 	trustedProxies []netip.Prefix
 	parseClient    *http.Client
 	forbiddenPage  []byte
+	tracerProvider trace.TracerProvider
 }
 
 // New 创建 Server
@@ -63,6 +67,7 @@ func New(d Deps) *Server {
 		trap:           d.Trap,
 		trustedProxies: parsePrefixes(d.Config.TrustedProxies, d.Log),
 		parseClient:    d.ParseClient,
+		tracerProvider: d.TracerProvider,
 		forbiddenPage:  loadForbiddenPage(filepath.Join(d.Config.DataDir, "pages", "403.html"), d.Log),
 	}
 	if s.parseClient == nil {
@@ -78,6 +83,9 @@ func (s *Server) Handler() *gin.Engine {
 	_ = r.SetTrustedProxies(nil)
 
 	r.Use(gin.Recovery())
+	if s.tracerProvider != nil {
+		r.Use(s.tracing())
+	}
 	r.Use(cors.New(s.corsConfig()))
 	r.Use(crossOriginResourcePolicy())
 	r.Use(correlation())

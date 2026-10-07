@@ -121,6 +121,10 @@ docker-compose up -d
 | `LISTEN_ADDR` | Listen address | `:8080` |
 | `LOG_FORMAT` | Log format: `text` or `json` | `text` |
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
+| `OPENTELEMETRY` | Set to `1` to export logs and traces over OTLP/HTTP; when unset no OpenTelemetry component is created | _(unset)_ |
+| `OPENTELEMETRY_LOG_LEVEL` | Minimum level of logs exported over OTLP | same as `LOG_LEVEL` |
+| `BETTERSTACK_SOURCE_TOKEN` | Send directly to Better Stack (overrides `OTEL_EXPORTER_OTLP_*`); when unset the standard `OTEL_*` variables apply (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_TRACES_SAMPLER`, …) | _(unset)_ |
+| `BETTERSTACK_INGESTING_HOST` | Better Stack ingesting host (hostname only) | `s2788200.us-west-2a.betterstackdata.com` |
 | `QQWRY_PATH` | Path to `qqwry.dat` | `providers/qqwry/qqwry.dat` |
 
 ## API Documentation

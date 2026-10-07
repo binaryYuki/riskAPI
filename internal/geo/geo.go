@@ -62,7 +62,7 @@ func (s *Service) Lookup(ctx context.Context, ipStr string, log *slog.Logger) (r
 			if err == nil {
 				mergeGeneric(providerData, data)
 			} else if !errors.Is(err, errMMDBUnavailable) {
-				log.Error("mmdb lookup failed", "provider", p.name, "db", dbPath, "err", err)
+				log.ErrorContext(ctx, "mmdb lookup failed", "provider", p.name, "db", dbPath, "err", err)
 			}
 		}
 		if len(providerData) > 0 {
@@ -78,7 +78,7 @@ func (s *Service) Lookup(ctx context.Context, ipStr string, log *slog.Logger) (r
 			"area": area,
 		}
 	} else {
-		log.Error("qqwry lookup failed", "err", err)
+		log.ErrorContext(ctx, "qqwry lookup failed", "err", err)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, s.lookupTimeout)
@@ -87,17 +87,17 @@ func (s *Service) Lookup(ctx context.Context, ipStr string, log *slog.Logger) (r
 	// 仅当其它 provider 判定为中国(CN) 且 IP 适合时再调用美团 API；否则(非中国)调用 ip.sb
 	if isChina(results) {
 		if !meituan.Suitable(ipStr) {
-			log.Info("meituan skipped", "reason", "unsuitable_ipv4")
+			log.InfoContext(ctx, "meituan skipped", "reason", "unsuitable_ipv4")
 		} else if data, err := meituan.Query(ctx, ipStr, nil, meituan.QueryOptions{Enhanced: true}); err != nil {
 			complete = false
-			log.Error("meituan lookup failed", "err", err)
+			log.ErrorContext(ctx, "meituan lookup failed", "err", err)
 		} else if len(data) > 0 {
 			results["meituan"] = data
 		}
 	} else {
 		if data, err := ipsb.Query(ctx, ipStr, nil); err != nil {
 			complete = false
-			log.Error("ipsb lookup failed", "err", err)
+			log.ErrorContext(ctx, "ipsb lookup failed", "err", err)
 		} else if len(data) > 0 {
 			results["ipsb"] = data
 		}

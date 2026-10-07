@@ -119,6 +119,10 @@ docker-compose up -d
 | `LISTEN_ADDR` | 监听地址 | `:8080` |
 | `LOG_FORMAT` | 日志格式：`text` 或 `json` | `text` |
 | `LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
+| `OPENTELEMETRY` | 设为 `1` 时通过 OTLP/HTTP 上报日志与链路追踪；未设置时不创建任何 OpenTelemetry 组件 | _(未设置)_ |
+| `OPENTELEMETRY_LOG_LEVEL` | 经 OTLP 上报日志的最低级别 | 同 `LOG_LEVEL` |
+| `BETTERSTACK_SOURCE_TOKEN` | 设置后直接发往 Better Stack（优先于 `OTEL_EXPORTER_OTLP_*`）；未设置时按标准 `OTEL_*` 变量配置（`OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_TRACES_SAMPLER` 等） | _(未设置)_ |
+| `BETTERSTACK_INGESTING_HOST` | Better Stack 接收地址（只填主机名） | `s2788200.us-west-2a.betterstackdata.com` |
 | `QQWRY_PATH` | 纯真库 `qqwry.dat` 路径 | `providers/qqwry/qqwry.dat` |
 
 ## API文档
