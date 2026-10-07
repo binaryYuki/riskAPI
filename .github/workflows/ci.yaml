@@ -111,26 +111,43 @@ jobs:
           sha256sum ./*.mmdb qqwry.dat > SHA256SUMS
           gh release upload geo-data ./* --clobber --repo "$GITHUB_REPOSITORY"
 
-      - name: Redeploy Koyeb service
+      # 触发 Portainer stack webhook：Portainer 从 Git 拉取并重新构建部署
+      - name: Redeploy via Portainer webhook
         if: env.DEPLOY == 'true'
         env:
-          KOYEB_API_TOKEN: ${{ secrets.KOYEB_API_TOKEN }}
-          KOYEB_SERVICE_ID: ${{ secrets.KOYEB_SERVICE_ID }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
         run: |
           set -euo pipefail
-          sleep 3 # 等待镜像仓库同步
-          echo "Triggering redeploy for service ${KOYEB_SERVICE_ID: -4}..."
-          HTTP_CODE=$(curl -sS -X POST \
-            -H "Authorization: Bearer ${KOYEB_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d '{}' \
-            -o /tmp/koyeb_resp.json \
-            -w "%{http_code}" \
-            "https://app.koyeb.com/v1/services/${KOYEB_SERVICE_ID}/redeploy")
-          echo "Koyeb API HTTP ${HTTP_CODE}"
+          HTTP_CODE=$(curl -sS -X POST -o /tmp/webhook_resp.txt -w "%{http_code}" "${WEBHOOK_URL}")
+          echo "Portainer webhook HTTP ${HTTP_CODE}"
           if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
             echo "Redeploy failed. Response body:"
-            cat /tmp/koyeb_resp.json
+            cat /tmp/webhook_resp.txt
             exit 1
           fi
           echo "Redeploy triggered successfully."
+
+      # 已迁移到 Portainer，Koyeb 部署暂时停用
+      # - name: Redeploy Koyeb service
+      #   if: env.DEPLOY == 'true'
+      #   env:
+      #     KOYEB_API_TOKEN: ${{ secrets.KOYEB_API_TOKEN }}
+      #     KOYEB_SERVICE_ID: ${{ secrets.KOYEB_SERVICE_ID }}
+      #   run: |
+      #     set -euo pipefail
+      #     sleep 3 # 等待镜像仓库同步
+      #     echo "Triggering redeploy for service ${KOYEB_SERVICE_ID: -4}..."
+      #     HTTP_CODE=$(curl -sS -X POST \
+      #       -H "Authorization: Bearer ${KOYEB_API_TOKEN}" \
+      #       -H "Content-Type: application/json" \
+      #       -d '{}' \
+      #       -o /tmp/koyeb_resp.json \
+      #       -w "%{http_code}" \
+      #       "https://app.koyeb.com/v1/services/${KOYEB_SERVICE_ID}/redeploy")
+      #     echo "Koyeb API HTTP ${HTTP_CODE}"
+      #     if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+      #       echo "Redeploy failed. Response body:"
+      #       cat /tmp/koyeb_resp.json
+      #       exit 1
+      #     fi
+      #     echo "Redeploy triggered successfully."
