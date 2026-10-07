@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"runtime"
@@ -13,6 +15,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	oteltrace "go.opentelemetry.io/otel/trace"
+
+	"risky_ip_filter/internal/telemetry"
 )
 
 func newTracedEnv(t *testing.T) (*testEnv, *tracetest.SpanRecorder) {
@@ -83,4 +87,35 @@ func TestTracing_SkipsHealthAndMetrics(t *testing.T) {
 	env.do(http.MethodGet, "/api/ready")
 	env.do(http.MethodGet, "/metrics")
 	assert.Empty(t, rec.Ended())
+}
+
+// skipRecorder 记录每条访问日志的 path 及其 ctx 是否带 SkipExport 标记
+type skipRecorder struct {
+	slog.Handler
+	skipped map[string]bool
+}
+
+func (h *skipRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h *skipRecorder) Handle(ctx context.Context, r slog.Record) error {
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "path" {
+			h.skipped[a.Value.String()] = telemetry.ExportSkipped(ctx)
+		}
+		return true
+	})
+	return nil
+}
+
+func TestRequestLog_HealthNotExported(t *testing.T) {
+	rec := &skipRecorder{skipped: map[string]bool{}}
+	env := newTestEnv(t)
+	env.server.log = slog.New(rec)
+	env.h = env.server.Handler()
+
+	for _, p := range []string{"/api/ready", "/metrics", "/version"} {
+		env.do(http.MethodGet, p)
+	}
+	assert.True(t, rec.skipped["/api/ready"])
+	assert.True(t, rec.skipped["/metrics"])
+	assert.False(t, rec.skipped["/version"])
 }

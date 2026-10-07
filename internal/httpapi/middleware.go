@@ -13,6 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"risky_ip_filter/internal/telemetry"
 )
 
 // sensitivePathRegex 敏感文件/目录路径，直接返回 403
@@ -59,7 +61,11 @@ func (s *Server) requestLogger() gin.HandlerFunc {
 		s.annotateSpan(c)
 		c.Next()
 		// 带 ctx 记录，开启追踪时日志自动关联 trace_id / span_id
-		s.log.InfoContext(c.Request.Context(), "request",
+		ctx := c.Request.Context()
+		if telemetrySkipPaths[c.Request.URL.Path] {
+			ctx = telemetry.SkipExport(ctx)
+		}
+		s.log.InfoContext(ctx, "request",
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,
 			"status", c.Writer.Status(),
