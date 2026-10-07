@@ -384,7 +384,25 @@ func TestReady(t *testing.T) {
 	w := env.do(http.MethodGet, "/api/ready")
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Equal(t, "loading", statusOf(w.Body.String()))
+	assert.Contains(t, w.Body.String(), `"version": "test"`)
 	assert.Equal(t, http.StatusOK, env.do(http.MethodGet, "/api/status").Code)
+
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "1.2.3.0/24\n")
+	}))
+	defer feed.Close()
+	env = newTestEnv(t, func(c *config.Config) { c.Feeds = []feeds.Feed{{ID: "f", URL: feed.URL}} })
+	env.risk.Update(context.Background())
+	w = env.do(http.MethodGet, "/api/ready")
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body struct {
+		Status  string         `json:"status"`
+		Message map[string]any `json:"message"`
+	}
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ok", body.Status)
+	assert.Equal(t, "test", body.Message["version"])
+	assert.EqualValues(t, 1, body.Message["risk_prefixes"])
 }
 
 func TestCDNEndpoints(t *testing.T) {

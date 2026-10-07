@@ -7,9 +7,6 @@ ARG GO_VERSION=1.26.8
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 WORKDIR /src
 
-# Install git for commit hash retrieval
-RUN apk add --no-cache git
-
 # Copy project files
 COPY . .
 
@@ -49,14 +46,15 @@ RUN set -eu; \
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download -x
 
-# Build binary with custom version: YYMMDDHHMM-<commit[:6]>
-# 构建上下文可能不含 .git（如 Portainer 从 Git 部署），此时 commit 记为 unknown
+# Build binary with custom version: YYMMDDHHMM-<源码内容 hash 前 6 位>
+# Portainer 拉取的代码不含 .git，拿不到 commit；内容 hash 由 scripts/content-version.sh 计算，
+# 本地可用同一脚本找出线上版本对应的 commit
 ARG TARGETOS
 ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=bind,target=. \
-    COMMIT="$(git rev-parse --short=6 HEAD 2>/dev/null || echo unknown)" && \
-    VERSION="$(date -u +'%y%m%d%H%M')-${COMMIT}" && \
+    CONTENT="$(sh scripts/content-version.sh)" && \
+    VERSION="$(date -u +'%y%m%d%H%M')-${CONTENT}" && \
     CGO_ENABLED=0 \
     GOOS=$TARGETOS \
     GOARCH=$TARGETARCH \
