@@ -35,8 +35,9 @@ func newOTelHandler(next slog.Handler, level slog.Level) slog.Handler {
 	return &otelHandler{next: next, level: level}
 }
 
+// Enabled 对带 SkipExport 标记的 ctx 返回 false；slog.MultiHandler 按 handler 分别判断，stdout 不受影响
 func (h *otelHandler) Enabled(ctx context.Context, l slog.Level) bool {
-	return l >= h.level && h.next.Enabled(ctx, l)
+	return l >= h.level && !ExportSkipped(ctx) && h.next.Enabled(ctx, l)
 }
 
 // Handle 拦截 panic：日志也会在没有 gin.Recovery 保护的后台 goroutine（风险源更新等）中记录，

@@ -23,8 +23,8 @@ import (
 // 不提取入站 traceparent：公开 API 的调用方不可信，每个请求都是新 trace 的根。
 // 出站请求同样不注入 traceparent，避免把内部 trace ID 泄露给第三方 API。
 
-// tracingSkipPaths 健康检查与指标抓取，量大且无排查价值
-var tracingSkipPaths = map[string]bool{
+// telemetrySkipPaths 健康检查与指标抓取，量大且无排查价值：不生成 span，访问日志也不经 OTLP 上报（stdout 照常）
+var telemetrySkipPaths = map[string]bool{
 	"/api/ready": true,
 	"/metrics":   true,
 }
@@ -32,7 +32,7 @@ var tracingSkipPaths = map[string]bool{
 func (s *Server) tracing() gin.HandlerFunc {
 	return otelgin.Middleware("riskapi",
 		otelgin.WithTracerProvider(s.tracerProvider),
-		otelgin.WithFilter(func(r *http.Request) bool { return !tracingSkipPaths[r.URL.Path] }),
+		otelgin.WithFilter(func(r *http.Request) bool { return !telemetrySkipPaths[r.URL.Path] }),
 	)
 }
 

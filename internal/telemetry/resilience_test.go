@@ -91,3 +91,30 @@ func TestResilience_InvalidEndpointDoesNotStopService(t *testing.T) {
 	assert.Contains(t, buf.String(), "service keeps running")
 	assert.NotPanics(t, func() { _ = tel.Shutdown() })
 }
+
+type countingHandler struct {
+	slog.Handler
+	n *int
+}
+
+func (h countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h countingHandler) Handle(context.Context, slog.Record) error {
+	*h.n++
+	return nil
+}
+
+func TestSkipExport_StdoutOnly(t *testing.T) {
+	var buf bytes.Buffer
+	exported := 0
+	log := slog.New(slog.NewMultiHandler(
+		slog.NewJSONHandler(&buf, nil),
+		newOTelHandler(countingHandler{n: &exported}, slog.LevelInfo),
+	))
+
+	log.InfoContext(SkipExport(context.Background()), "health")
+	assert.Equal(t, 0, exported)
+	assert.Contains(t, buf.String(), `"msg":"health"`)
+
+	log.InfoContext(context.Background(), "normal")
+	assert.Equal(t, 1, exported)
+}
