@@ -66,7 +66,10 @@ go mod tidy
 
 # 3. Download geolocation databases (not stored in git)
 # Pulls the last known good set from the `geo-data` GitHub Release (needs `gh auth login`),
-# then refreshes from upstream; MaxMind / IPinfo refresh only when their tokens are set
+# then refreshes from upstream; MaxMind / IPinfo refresh only when their tokens are set.
+# MaxMind accepts several comma-separated keys and falls back to the next one when a key
+# is rejected or hits its download limit: MAXMIND_LICENSE_KEY=keyA,keyB with
+# MAXMIND_ACCOUNT_ID=111,222 (paired by position; a single account ID is shared by all keys)
 ./scripts/fetch-geo-data.sh
 
 # 4. Configure environment variables (optional)

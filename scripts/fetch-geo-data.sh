@@ -7,6 +7,11 @@
 # 单个源失败不影响其它源；最终仍缺文件时以非零状态退出。
 #
 # 可选环境变量：MAXMIND_ACCOUNT_ID / MAXMIND_LICENSE_KEY、IPINFO_TOKEN（未设置则只用兜底版本）
+#
+# MaxMind 支持多个 key（逗号分隔），某个 key 达到下载上限或失效时自动换下一个：
+#   MAXMIND_LICENSE_KEY=keyA,keyB
+#   MAXMIND_ACCOUNT_ID=111,222   # 按位置与 key 一一对应；只给一个时所有 key 共用
+# 免费版下载上限按账号计算，同一账号下的多个 key 共享额度，要分散额度需用不同账号的 key。
 set -euo pipefail
 
 DEST="${DEST:-providers}"
@@ -81,18 +86,68 @@ fi
 echo "== 2/2 从源头下载最新版"
 dl() { curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 600 "$@"; }
 
+# split_csv <字符串>：按逗号拆分并去掉空白，结果放入数组 csv
+split_csv() {
+  local item
+  csv=()
+  IFS=',' read -ra items <<<"$1"
+  for item in ${items[@]+"${items[@]}"}; do
+    item="${item//[[:space:]]/}"
+    [ -n "$item" ] && csv+=("$item")
+  done
+  return 0
+}
+
+mm_keys=() mm_ids=() mm_next=0
 if [ -n "${MAXMIND_ACCOUNT_ID:-}" ] && [ -n "${MAXMIND_LICENSE_KEY:-}" ]; then
+  # ${arr[@]+"${arr[@]}"}：bash 3.2（macOS）在 set -u 下展开空数组会报错
+  split_csv "$MAXMIND_LICENSE_KEY"; mm_keys=(${csv[@]+"${csv[@]}"})
+  split_csv "$MAXMIND_ACCOUNT_ID"; mm_ids=(${csv[@]+"${csv[@]}"})
+  if [ "${#mm_ids[@]}" -eq 1 ]; then
+    for ((i = 1; i < ${#mm_keys[@]}; i++)); do mm_ids+=("${mm_ids[0]}"); done
+  fi
+  if [ "${#mm_ids[@]}" -ne "${#mm_keys[@]}" ]; then
+    echo "  ✗ MAXMIND_ACCOUNT_ID 数量（${#mm_ids[@]}）与 MAXMIND_LICENSE_KEY 数量（${#mm_keys[@]}）不一致，跳过 MaxMind" >&2
+    mm_keys=()
+  fi
+  # GitHub Actions 只会遮蔽整个 secret；拆开后的单个 key 要单独遮蔽，以防出现在日志里
+  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    for k in ${mm_keys[@]+"${mm_keys[@]}"}; do echo "::add-mask::$k"; done
+  fi
+fi
+
+# maxmind_download <edition> <输出文件>：从当前 key 开始依次尝试。
+# 401/403（key 无效）与 429（达到下载上限）立即换下一个 key；其它错误（5xx、网络）同一 key 重试 3 次。
+# 成功的 key 留给下一个 edition 继续用，已用尽的 key 不再重复请求。日志只显示 key 序号。
+maxmind_download() {
+  local edition="$1" out="$2" i attempt code
+  for ((i = mm_next; i < ${#mm_keys[@]}; i++)); do
+    for attempt in 1 2 3; do
+      code="$(curl -sSL --connect-timeout 20 --max-time 600 -o "$out" -w '%{http_code}' \
+        -u "${mm_ids[$i]}:${mm_keys[$i]}" \
+        "${MAXMIND_DOWNLOAD_BASE:-https://download.maxmind.com}/geoip/databases/$edition/download?suffix=tar.gz")" || true
+      case "$code" in
+        200) mm_next=$i; return 0 ;;
+        401 | 403 | 429) break ;;
+      esac
+      if [ "$attempt" -lt 3 ]; then sleep $((attempt * 3)); fi
+    done
+    echo "  ! MaxMind ${edition}：key #$((i + 1))/${#mm_keys[@]} 失败（HTTP ${code:-000}），换下一个" >&2
+  done
+  mm_next=${#mm_keys[@]}
+  return 1
+}
+
+if [ "${#mm_keys[@]}" -gt 0 ]; then
   for edition in GeoLite2-ASN GeoLite2-Country; do
     d="$work/maxmind-$edition"; mkdir -p "$d"
-    if dl -u "$MAXMIND_ACCOUNT_ID:$MAXMIND_LICENSE_KEY" -o "$d/db.tar.gz" \
-      "https://download.maxmind.com/geoip/databases/$edition/download?suffix=tar.gz" &&
-      tar -xzf "$d/db.tar.gz" -C "$d"; then
+    if maxmind_download "$edition" "$d/db.tar.gz" && tar -xzf "$d/db.tar.gz" -C "$d"; then
       install "$edition.mmdb" "$(find "$d" -name "$edition.mmdb" | head -n1)"
     else
-      echo "  ✗ MaxMind $edition 下载失败" >&2
+      echo "  ✗ MaxMind $edition 下载或解压失败" >&2
     fi
   done
-else
+elif [ -z "${MAXMIND_ACCOUNT_ID:-}" ] || [ -z "${MAXMIND_LICENSE_KEY:-}" ]; then
   echo "  - 未设置 MAXMIND_ACCOUNT_ID / MAXMIND_LICENSE_KEY，跳过 MaxMind"
 fi
 
