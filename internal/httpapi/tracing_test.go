@@ -85,6 +85,7 @@ func TestTracing_IgnoresInboundTraceparent(t *testing.T) {
 func TestTracing_SkipsHealthAndMetrics(t *testing.T) {
 	env, rec := newTracedEnv(t)
 	env.do(http.MethodGet, "/api/ready")
+	env.do(http.MethodGet, "/api/status")
 	env.do(http.MethodGet, "/metrics")
 	assert.Empty(t, rec.Ended())
 }
@@ -112,10 +113,11 @@ func TestRequestLog_HealthNotExported(t *testing.T) {
 	env.server.log = slog.New(rec)
 	env.h = env.server.Handler()
 
-	for _, p := range []string{"/api/ready", "/metrics", "/version"} {
+	for _, p := range []string{"/api/ready", "/api/status", "/metrics", "/version"} {
 		env.do(http.MethodGet, p)
 	}
 	assert.True(t, rec.skipped["/api/ready"])
+	assert.True(t, rec.skipped["/api/status"])
 	assert.True(t, rec.skipped["/metrics"])
 	assert.False(t, rec.skipped["/version"])
 }
