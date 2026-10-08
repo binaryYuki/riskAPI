@@ -64,7 +64,9 @@ go mod tidy
 
 # 3. 下载地理位置数据库（不入 git）
 # 先从 GitHub Release `geo-data` 取最近一次成功版本（需 `gh auth login`），再从源头更新；
-# MaxMind / IPinfo 仅在设置了对应 token 时更新
+# MaxMind / IPinfo 仅在设置了对应 token 时更新。
+# MaxMind 支持多个 key（逗号分隔），某个 key 被拒绝或达到下载上限时自动换下一个：
+# MAXMIND_LICENSE_KEY=keyA,keyB，MAXMIND_ACCOUNT_ID=111,222（按位置对应；只给一个账号 ID 时所有 key 共用）
 ./scripts/fetch-geo-data.sh
 
 # 4. 配置环境变量 (可选)
