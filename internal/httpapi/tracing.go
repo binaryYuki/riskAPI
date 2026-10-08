@@ -25,8 +25,9 @@ import (
 
 // telemetrySkipPaths 健康检查与指标抓取，量大且无排查价值：不生成 span，访问日志也不经 OTLP 上报（stdout 照常）
 var telemetrySkipPaths = map[string]bool{
-	"/api/ready": true,
-	"/metrics":   true,
+	"/api/ready":  true,
+	"/api/status": true,
+	"/metrics":    true,
 }
 
 func (s *Server) tracing() gin.HandlerFunc {
