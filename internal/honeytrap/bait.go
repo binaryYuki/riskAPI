@@ -213,6 +213,9 @@ func render(b Bait, method, host, path string, tok tokens) (baitResponse, bool) 
 		// 多数被探测的脚本（配置、探针、木马）被直接访问时输出空页面
 		return php(html(""))
 
+	case BaitForbidden:
+		// 始终使用下方的 403 页面
+
 	case BaitNone:
 		return baitResponse{}, false
 	}
