@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +188,60 @@ func TestHoneytrap_FlaggedSourceIsRisky(t *testing.T) {
 	// CDN 回源网段即使被记到也不判为风险
 	env.do(http.MethodGet, "/.git/config", withRemote("104.16.0.1:1"))
 	assert.Equal(t, "cdn", lookup("104.16.0.1").Status)
+}
+
+func TestHoneytrap_ExportIncludesObfuscatedFlaggedSources(t *testing.T) {
+	env := newTestEnv(t, trapConfig(func(c *honeytrap.Config) { c.Secret = "test-secret" }))
+	assert.Equal(t, "# empty\n", env.do(http.MethodGet, "/api/export").Body.String())
+
+	env.do(http.MethodGet, "/.git/config", withRemote("45.33.32.156:1"))
+	id := honeytrapSourceID(t, "test-secret", "45.33.32.156")
+
+	// 风险表为空时，蜜罐来源也会导出
+	w := env.do(http.MethodGet, "/api/export")
+	assert.Regexp(t, `^# honeytrap `+id+` until \d{4}-\d\d-\d\dT[\d:]+Z$`, w.Body.String())
+	assert.Equal(t, "0", w.Header().Get("X-Total-Count"))
+	assert.Equal(t, "1", w.Header().Get("X-Honeytrap-Count"))
+
+	// 与风险 CIDR 一起导出时排在末尾，且不出现真实地址
+	env.setRisky(map[string]string{"203.0.113.0/24": "feed-a"})
+	w = env.do(http.MethodGet, "/api/export")
+	assert.Equal(t, "203.0.113.0/24 # feed-a\n# honeytrap "+id, strings.SplitN(w.Body.String(), " until ", 2)[0])
+	assert.NotContains(t, w.Body.String(), "45.33.32.156")
+	assert.Equal(t, "1", w.Header().Get("X-Total-Count"))
+}
+
+func TestHoneytrap_RevealSourceRequiresAdmin(t *testing.T) {
+	env := newTestEnv(t, trapConfig(func(c *honeytrap.Config) { c.Secret = "test-secret" }))
+	env.do(http.MethodGet, "/.git/config", withRemote("45.33.32.156:1"))
+
+	// 同一密钥下标识是确定的，可以由另一个蜜罐实例算出
+	id := honeytrapSourceID(t, "test-secret", "45.33.32.156")
+	assert.Equal(t, http.StatusUnauthorized, env.do(http.MethodGet, "/api/honeytrap/source/"+id).Code)
+
+	w := env.do(http.MethodGet, "/api/honeytrap/source/"+id, asAdmin())
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"source": "45.33.32.156"`)
+	assert.Contains(t, w.Body.String(), `"flagged": true`)
+
+	assert.Equal(t, http.StatusNotFound, env.do(http.MethodGet, "/api/honeytrap/source/not-a-source-id", asAdmin()).Code)
+	other := honeytrapSourceID(t, "another-secret", "45.33.32.156")
+	assert.Equal(t, http.StatusNotFound, env.do(http.MethodGet, "/api/honeytrap/source/"+other, asAdmin()).Code)
+}
+
+// honeytrapSourceID 用给定密钥算出某个 IP 的混淆标识：让一个临时蜜罐标记它，再从标记文件里读出来
+func honeytrapSourceID(t *testing.T, secret, ip string) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "flagged.jsonl")
+	env := newTestEnv(t, trapConfig(func(c *honeytrap.Config) { c.Secret, c.FlagFile = secret, file }))
+	env.do(http.MethodGet, "/.env", withRemote(ip+":1"))
+	data, err := os.ReadFile(file)
+	assert.NoError(t, err)
+	var rec struct {
+		Source string `json:"source"`
+	}
+	assert.NoError(t, json.Unmarshal(data, &rec))
+	return rec.Source
 }
 
 func TestHoneytrap_NotFoundProbingIsScored(t *testing.T) {

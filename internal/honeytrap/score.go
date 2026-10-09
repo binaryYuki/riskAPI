@@ -71,6 +71,7 @@ type outcome struct {
 	blocked      bool    // 请求到达时已在封禁期内（不再计分）
 	newlyBlocked bool
 	newlyFlagged bool
+	flagUntil    time.Time // 本次命中使来源处于标记期时，标记的到期时间
 	blockUntil   time.Time
 }
 
@@ -122,6 +123,7 @@ func (s *scorer) observe(key netip.Addr, pathHash uint64, weight float64, now ti
 	if st.score >= s.cfg.flagThreshold || st.score >= s.cfg.blockThreshold {
 		out.newlyFlagged = !now.Before(st.flagUntil)
 		st.flagUntil = now.Add(s.cfg.flagDuration)
+		out.flagUntil = st.flagUntil
 	}
 	if st.score >= s.cfg.blockThreshold {
 		st.blockUntil = now.Add(s.cfg.blockDuration)
@@ -130,17 +132,17 @@ func (s *scorer) observe(key netip.Addr, pathHash uint64, weight float64, now ti
 	return out
 }
 
-// mark 不看分数直接标记一个已在跟踪中的来源，返回它此前是否未被标记
-func (s *scorer) mark(key netip.Addr, now time.Time) bool {
+// mark 不看分数直接标记一个已在跟踪中的来源，返回标记的到期时间以及它此前是否未被标记
+func (s *scorer) mark(key netip.Addr, now time.Time) (until time.Time, newly bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.sources[key]
 	if st == nil {
-		return false
+		return time.Time{}, false
 	}
-	newly := !now.Before(st.flagUntil)
+	newly = !now.Before(st.flagUntil)
 	st.flagUntil = now.Add(s.cfg.flagDuration)
-	return newly
+	return st.flagUntil, newly
 }
 
 // evict 淘汰最久未活动的来源；尽量跳过仍被标记或封禁的记录
@@ -160,14 +162,6 @@ func (s *scorer) evict(now time.Time) {
 func (s *scorer) remove(st *sourceStat) {
 	s.lru.Remove(st.elem)
 	delete(s.sources, st.key)
-}
-
-// flagged 来源当前是否处于标记期
-func (s *scorer) flagged(key netip.Addr, now time.Time) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	st := s.sources[key]
-	return st != nil && now.Before(st.flagUntil)
 }
 
 // prune 清理分数已漏空、未被标记且长时间未活动的来源
@@ -190,14 +184,9 @@ func (s *scorer) prune(now time.Time) {
 	}
 }
 
-// counts 返回当前跟踪的来源数与其中处于标记期的来源数
-func (s *scorer) counts(now time.Time) (tracked, flagged int) {
+// len 返回当前跟踪的来源数
+func (s *scorer) len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, st := range s.sources {
-		if now.Before(st.flagUntil) {
-			flagged++
-		}
-	}
-	return len(s.sources), flagged
+	return len(s.sources)
 }

@@ -72,7 +72,8 @@ func (s *Server) flushIndex(c *gin.Context) {
 	}})
 }
 
-// exportCIDRs GET /api/export 导出全部风险 CIDR 并注释来源；单个 IP（/32、/128）不导出
+// exportCIDRs GET /api/export 导出全部风险 CIDR 并注释来源；单个 IP（/32、/128）不导出。
+// 被蜜罐标记的来源以混淆后的标识附在末尾，写成注释行，不影响按 CIDR 解析的使用方
 func (s *Server) exportCIDRs(c *gin.Context) {
 	var lines []string
 	for pfx, src := range s.risk.Snapshot().All() {
@@ -85,14 +86,31 @@ func (s *Server) exportCIDRs(c *gin.Context) {
 		lines = append(lines, pfx.String()+" # "+src)
 	}
 
+	sort.Strings(lines) // 字典序，保持与旧版输出一致
+	cidrs := len(lines)
+	flagged := s.trap.FlaggedSources()
+	for _, f := range flagged {
+		lines = append(lines, "# honeytrap "+f.ID+" until "+f.Until.UTC().Format(time.RFC3339))
+	}
+
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	if len(lines) == 0 {
 		c.String(http.StatusOK, "# empty\n")
 		return
 	}
-	sort.Strings(lines) // 字典序，保持与旧版输出一致
 	c.Header("Cache-Control", "public, max-age=1800, immutable")
 	c.Header("X-Last-Updated", time.Now().UTC().Format(time.RFC3339))
-	c.Header("X-Total-Count", strconv.Itoa(len(lines)))
+	c.Header("X-Total-Count", strconv.Itoa(cidrs))
+	c.Header("X-Honeytrap-Count", strconv.Itoa(len(flagged)))
 	c.String(http.StatusOK, strings.Join(lines, "\n"))
+}
+
+// revealSource GET /api/honeytrap/source/:id 把蜜罐日志或标记文件中混淆后的来源还原为地址
+func (s *Server) revealSource(c *gin.Context) {
+	source, ok := s.trap.Reveal(c.Param("id"))
+	if !ok {
+		handleError(c, http.StatusNotFound, "unknown source id, or it was not created with the current HONEYTRAP_SECRET")
+		return
+	}
+	c.IndentedJSON(http.StatusOK, Response{Status: "ok", Message: gin.H{"source": source, "flagged": s.trap.Flagged(strings.TrimSuffix(source, "/64"))}})
 }

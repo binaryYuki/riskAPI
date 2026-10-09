@@ -1,11 +1,14 @@
 package honeytrap
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,10 +26,58 @@ func fastCfg(mutate ...func(*Config)) Config {
 	return cfg
 }
 
+// logCapture 收集蜜罐输出的 JSON 日志，供测试按事件类型取用
+type logCapture struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *logCapture) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *logCapture) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+// of 返回某类事件的日志记录
+func (l *logCapture) of(kind eventKind) []map[string]any {
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(l.String()), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "honeytrap "+string(kind) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
 // newTestTrap 构建与线上相同的接线：中间件 + NoRoute 链首的 NotFound
 func newTestTrap(cfg Config) (*Trap, *gin.Engine) {
+	return buildTrap(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// newLoggedTrap 与 newTestTrap 相同，并记录全部事件日志
+func newLoggedTrap(cfg Config) (*Trap, *gin.Engine, *logCapture) {
+	logs := &logCapture{}
+	cfg.EnableLog = true
+	trap, r := buildTrap(cfg, slog.New(slog.NewJSONHandler(logs, nil)))
+	return trap, r, logs
+}
+
+// hidden 返回某个 IP 在该蜜罐日志中的混淆标识
+func hidden(trap *Trap, ip string) string {
+	key, _ := sourceKey(ip)
+	return trap.obf.hide(key)
+}
+
+func buildTrap(cfg Config, log *slog.Logger) (*Trap, *gin.Engine) {
 	gin.SetMode(gin.TestMode)
-	trap := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	trap := New(cfg, log)
 	clientIP := func(c *gin.Context) string { return c.RemoteIP() }
 	r := gin.New()
 	r.Use(func(c *gin.Context) { c.Header("X-Request-ID", "real-service") })
@@ -218,7 +269,6 @@ func TestWithDefaults(t *testing.T) {
 	cfg := Config{FakeOKProb: 3, BlockThreshold: 2}.withDefaults()
 	assert.Equal(t, 1.0, cfg.FakeOKProb)
 	assert.Equal(t, 2, cfg.FlagThreshold, "flag threshold never exceeds block threshold")
-	assert.NotEmpty(t, cfg.Rules)
 
 	cfg = Config{}.withDefaults()
 	assert.Equal(t, 8, cfg.FlagThreshold)

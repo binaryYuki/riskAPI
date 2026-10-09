@@ -24,6 +24,14 @@ func testScorer(mutate ...func(*scoreConfig)) *scorer {
 	return newScorer(cfg)
 }
 
+// flagged 来源在 now 是否处于标记期
+func (s *scorer) flagged(key netip.Addr, now time.Time) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st := s.sources[key]
+	return st != nil && now.Before(st.flagUntil)
+}
+
 func TestSourceKey(t *testing.T) {
 	key := func(ip string) string {
 		k, ok := sourceKey(ip)
@@ -83,6 +91,7 @@ func TestScorer_FlagThenBlock(t *testing.T) {
 
 	out := s.observe(src, 1, WeightHigh, now)
 	assert.True(t, out.newlyFlagged)
+	assert.Equal(t, now.Add(time.Hour), out.flagUntil)
 	assert.False(t, out.newlyBlocked)
 	assert.True(t, s.flagged(src, now))
 
@@ -106,6 +115,25 @@ func TestScorer_FlagThenBlock(t *testing.T) {
 	assert.False(t, s.flagged(netip.MustParseAddr("9.9.9.9"), now))
 }
 
+func TestScorer_Mark(t *testing.T) {
+	s := testScorer()
+	src := netip.MustParseAddr("8.8.8.8")
+	now := time.Now()
+
+	until, newly := s.mark(src, now)
+	assert.True(t, until.IsZero(), "untracked sources cannot be marked")
+	assert.False(t, newly)
+
+	out := s.observe(src, 1, WeightLow, now)
+	assert.True(t, out.flagUntil.IsZero())
+	until, newly = s.mark(src, now)
+	assert.Equal(t, now.Add(time.Hour), until)
+	assert.True(t, newly)
+	_, newly = s.mark(src, now.Add(time.Minute))
+	assert.False(t, newly)
+	assert.True(t, s.flagged(src, now.Add(30*time.Minute)))
+}
+
 func TestScorer_EvictsLeastRecentlyActive(t *testing.T) {
 	s := testScorer(func(c *scoreConfig) { c.maxSources = 3 })
 	now := time.Now()
@@ -117,9 +145,7 @@ func TestScorer_EvictsLeastRecentlyActive(t *testing.T) {
 	s.observe(b, 2, WeightLow, now.Add(3*time.Second)) // b 重新活动，c 成为最久未活动的未标记来源
 
 	s.observe(d, 1, WeightLow, now.Add(4*time.Second))
-	tracked, flagged := s.counts(now.Add(4 * time.Second))
-	assert.Equal(t, 3, tracked)
-	assert.Equal(t, 1, flagged)
+	assert.Equal(t, 3, s.len())
 	assert.Contains(t, s.sources, a, "flagged sources are kept while an unflagged one can be evicted")
 	assert.Contains(t, s.sources, b)
 	assert.NotContains(t, s.sources, c)

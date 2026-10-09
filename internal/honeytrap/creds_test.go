@@ -1,7 +1,6 @@
 package honeytrap
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,7 +9,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -18,30 +16,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// memSink 收集事件的测试用 Sink
-type memSink struct {
-	mu     sync.Mutex
-	events []Event
-}
-
-func (s *memSink) Record(e Event) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.events = append(s.events, e)
-}
-
-func (s *memSink) of(kind EventKind) []Event {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []Event
-	for _, e := range s.events {
-		if e.Kind == kind {
-			out = append(out, e)
-		}
-	}
-	return out
-}
 
 type reqOpt func(*http.Request)
 
@@ -96,23 +70,23 @@ func TestCredRegistry_IssueScanEvict(t *testing.T) {
 	now := time.Now()
 	value := func(i int) string { return fmt.Sprintf("credential-value-%04d", i) }
 
-	r.issue("too-short", IssuedCred{Label: "x"})
+	r.issue("too-short", issuedCred{label: "x"})
 	assert.Zero(t, r.len(), "short values are never registered")
 
 	for i := range 3 {
-		r.issue(strings.ReplaceAll(value(i), "-", "0"), IssuedCred{Label: "db_pass", Source: "1.1.1.1", At: now})
+		r.issue(strings.ReplaceAll(value(i), "-", "0"), issuedCred{label: "db_pass", source: "src-a", at: now})
 	}
 	// 重复登记只刷新时间，不占用新位置
 	later := now.Add(time.Minute)
 	first := strings.ReplaceAll(value(0), "-", "0")
-	r.issue(first, IssuedCred{Label: "db_pass", Source: "1.1.1.1", At: later})
+	r.issue(first, issuedCred{label: "db_pass", source: "src-a", at: later})
 	assert.Equal(t, 3, r.len())
 	creds, _ := r.scan("password=" + first + "&x=1")
 	require.Len(t, creds, 1)
-	assert.Equal(t, later, creds[0].At)
+	assert.Equal(t, later, creds[0].at)
 
 	// 写满后淘汰最早登记的
-	r.issue(strings.ReplaceAll(value(3), "-", "0"), IssuedCred{Label: "jwt"})
+	r.issue(strings.ReplaceAll(value(3), "-", "0"), issuedCred{label: "jwt"})
 	assert.Equal(t, 3, r.len())
 	creds, _ = r.scan(first)
 	assert.Empty(t, creds)
@@ -124,8 +98,8 @@ func TestCredRegistry_ScanFindsValuesInContext(t *testing.T) {
 	r := newCredRegistry(10)
 	secret := "abcDEF123+/xyzXYZ789+/qrs"
 	session := "SessionValue0123456789abcd"
-	r.issue(secret, IssuedCred{Label: "aws_secret", Source: "1.1.1.1"})
-	r.issue(session, IssuedCred{Label: sessionLabel, Source: "1.1.1.1"})
+	r.issue(secret, issuedCred{label: "aws_secret"})
+	r.issue(session, issuedCred{label: sessionLabel})
 
 	for _, text := range []string{
 		secret,
@@ -181,15 +155,14 @@ func TestLocalPath(t *testing.T) {
 
 // 完整链路：拿到假 .env → 用其中的数据库密码登录 phpMyAdmin → 带着假会话进入后台
 func TestDeepInteraction_HarvestLoginSession(t *testing.T) {
-	sink := &memSink{}
-	trap, r := newTestTrap(fastCfg(func(c *Config) { c.Sink = sink }))
+	trap, r, logs := newLoggedTrap(fastCfg())
 	const src = "8.8.8.8:1"
 
 	env := request(r, "/.env", src).Body.String()
 	dbPass := envValue(t, env, "DB_PASSWORD")
-	bait := sink.of(EventBait)
+	bait := logs.of(eventBait)
 	require.Len(t, bait, 1)
-	assert.ElementsMatch(t, []string{"app_key", "db_pass", "admin_pass", "mail_pass", "aws_id", "aws_secret"}, bait[0].Issued)
+	assert.ElementsMatch(t, []any{"app_key", "db_pass", "admin_pass", "mail_pass", "aws_id", "aws_secret"}, bait[0]["issued"])
 	assert.Equal(t, 6, trap.Stats().Issued)
 
 	// 登录页，然后是错误的密码：留在登录页并显示错误，用户名经过转义
@@ -216,27 +189,26 @@ func TestDeepInteraction_HarvestLoginSession(t *testing.T) {
 	assert.Equal(t, uint64(1), stats.Reuses)
 	assert.Zero(t, stats.Blocks, "an engaged source is not cut off by the block threshold")
 
-	reuse := sink.of(EventCredentialReuse)
+	reuse := logs.of(eventCredentialReuse)
 	require.Len(t, reuse, 1)
-	assert.Equal(t, "db_pass", reuse[0].Credential)
-	assert.Equal(t, "8.8.8.8", reuse[0].IssuedTo)
-	assert.Equal(t, "8.8.8.8", reuse[0].IP)
-	require.NotNil(t, reuse[0].IssuedAt)
+	assert.Equal(t, "db_pass", reuse[0]["credential"])
+	assert.Equal(t, hidden(trap, "8.8.8.8"), reuse[0]["issued_to"])
+	assert.Equal(t, hidden(trap, "8.8.8.8"), reuse[0]["source"])
+	assert.NotEmpty(t, reuse[0]["issued_at"])
 
-	// 事件里不出现明文密码
-	attempts := sink.of(EventLoginAttempt)
+	attempts := logs.of(eventLoginAttempt)
 	require.Len(t, attempts, 2)
-	assert.Equal(t, "<b>root</b>", attempts[0].Username)
-	assert.Equal(t, len("wrong-password"), attempts[0].PasswordLen)
-	all, err := json.Marshal(sink.events)
-	require.NoError(t, err)
-	assert.NotContains(t, string(all), "wrong-password")
-	assert.NotContains(t, string(all), dbPass)
+	assert.Equal(t, "<b>root</b>", attempts[0]["username"])
+	assert.EqualValues(t, len("wrong-password"), attempts[0]["password_len"])
+
+	// 事件日志里不出现明文密码，也不出现真实地址
+	assert.NotContains(t, logs.String(), "wrong-password")
+	assert.NotContains(t, logs.String(), dbPass)
+	assert.NotContains(t, logs.String(), "8.8.8.8")
 }
 
 func TestDeepInteraction_CredentialUsedByAnotherSource(t *testing.T) {
-	sink := &memSink{}
-	trap, r := newTestTrap(fastCfg(func(c *Config) { c.Sink = sink }))
+	trap, r, logs := newLoggedTrap(fastCfg())
 
 	adminPass := envValue(t, request(r, "/.env", "1.1.1.1:1").Body.String(), "ADMIN_PASSWORD")
 
@@ -247,12 +219,12 @@ func TestDeepInteraction_CredentialUsedByAnotherSource(t *testing.T) {
 	assert.Equal(t, "/wp-admin/", w.Header().Get("Location"))
 	assert.True(t, trap.Flagged("2.2.2.2"))
 
-	reuse := sink.of(EventCredentialReuse)
+	reuse := logs.of(eventCredentialReuse)
 	require.Len(t, reuse, 1)
-	assert.Equal(t, "admin_pass", reuse[0].Credential)
-	assert.Equal(t, "1.1.1.1", reuse[0].IssuedTo, "the event links the user of a credential to the source that harvested it")
-	assert.Equal(t, "2.2.2.2", reuse[0].IP)
-	assert.Len(t, sink.of(EventFlagged), 2)
+	assert.Equal(t, "admin_pass", reuse[0]["credential"])
+	assert.Equal(t, hidden(trap, "1.1.1.1"), reuse[0]["issued_to"], "the event links the user of a credential to the source that harvested it")
+	assert.Equal(t, hidden(trap, "2.2.2.2"), reuse[0]["source"])
+	assert.Len(t, logs.of(eventFlagged), 2)
 
 	// 假会话在别的来源手里同样有效，进入的是假的 WordPress 后台
 	w = request(r, "/wp-admin/", "3.3.3.3:1", withHeader("Cookie", sessionCookie(t, w)))
@@ -260,8 +232,7 @@ func TestDeepInteraction_CredentialUsedByAnotherSource(t *testing.T) {
 }
 
 func TestDeepInteraction_OtherEntryPoints(t *testing.T) {
-	sink := &memSink{}
-	trap, r := newTestTrap(fastCfg(func(c *Config) { c.Sink = sink }))
+	trap, r := newTestTrap(fastCfg())
 	env := request(r, "/.env", "1.1.1.1:1").Body.String()
 	adminPass, awsID := envValue(t, env, "ADMIN_PASSWORD"), envValue(t, env, "AWS_ACCESS_KEY_ID")
 
@@ -314,7 +285,7 @@ func TestInspection_IsBoundedAndScoped(t *testing.T) {
 
 	// 不返回伪造内容时同样不查看
 	trap, r = newTestTrap(fastCfg(func(c *Config) { c.FakeOKProb = 0 }))
-	trap.creds.issue(dbPass, IssuedCred{Label: "db_pass", Source: "1.1.1.1"})
+	trap.creds.issue(dbPass, issuedCred{label: "db_pass"})
 	request(r, "/phpmyadmin/", "2.2.2.2:1", withForm(url.Values{"pma_password": {dbPass}}))
 	assert.Zero(t, trap.Stats().Reuses)
 	assert.Zero(t, trap.Stats().Logins)
@@ -331,10 +302,10 @@ func TestEngagement_DoesNotLowerScoreForUnknownSources(t *testing.T) {
 	assert.NotZero(t, trap.Stats().Blocks)
 }
 
-func TestEmit_LogsWithoutSink(t *testing.T) {
+func TestEmit_AlwaysLogsFlaggingWithHiddenSource(t *testing.T) {
 	var buf strings.Builder
 	gin.SetMode(gin.TestMode)
-	trap := New(fastCfg(func(c *Config) { c.EnableLog = false }), slog.New(slog.NewTextHandler(&buf, nil)))
+	trap := New(fastCfg(func(c *Config) { c.EnableLog, c.Secret = false, "secret" }), slog.New(slog.NewTextHandler(&buf, nil)))
 	r := gin.New()
 	r.Use(trap.Middleware(func(c *gin.Context) string { return c.RemoteIP() }))
 
@@ -342,5 +313,6 @@ func TestEmit_LogsWithoutSink(t *testing.T) {
 	assert.Empty(t, buf.String(), "per-hit logging is off")
 	request(r, "/.env", "8.8.8.8:1")
 	assert.Contains(t, buf.String(), `msg="honeytrap flagged"`, "flagging is always logged")
-	assert.Contains(t, buf.String(), "ip=8.8.8.8")
+	assert.Contains(t, buf.String(), "source="+hidden(trap, "8.8.8.8"))
+	assert.NotContains(t, buf.String(), "8.8.8.8")
 }

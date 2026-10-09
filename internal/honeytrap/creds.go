@@ -21,28 +21,28 @@ const (
 	sessionLabel     = "session" // 假会话在登记表中的标签
 )
 
-// IssuedCred 一个已签发的假凭据的去向
-type IssuedCred struct {
-	Label  string    // 凭据种类，如 db_pass、aws_secret
-	Source string    // 当初拿到它的客户端 IP
-	At     time.Time // 最近一次签发时间
+// issuedCred 一个已签发的假凭据的去向
+type issuedCred struct {
+	label  string    // 凭据种类，如 db_pass、aws_secret
+	source string    // 当初拿到它的来源（混淆后）
+	at     time.Time // 最近一次签发时间
 }
 
 // credRegistry 假凭据登记表：值 → 签发记录。容量固定，按登记顺序淘汰
 type credRegistry struct {
 	mu      sync.Mutex
 	max     int
-	byValue map[string]IssuedCred
+	byValue map[string]issuedCred
 	ring    []string // 按登记顺序排列的值，写满后循环覆盖
 	next    int
 }
 
 func newCredRegistry(max int) *credRegistry {
-	return &credRegistry{max: max, byValue: make(map[string]IssuedCred)}
+	return &credRegistry{max: max, byValue: make(map[string]issuedCred)}
 }
 
 // issue 登记一个假凭据；同一个值重复登记只刷新签发时间
-func (r *credRegistry) issue(value string, cred IssuedCred) {
+func (r *credRegistry) issue(value string, cred issuedCred) {
 	if len(value) < minCredLen {
 		return
 	}
@@ -67,7 +67,7 @@ func (r *credRegistry) len() int {
 }
 
 // scan 在若干段文本中查找登记过的假凭据，返回命中的凭据（去重）以及其中是否有假会话
-func (r *credRegistry) scan(texts ...string) (creds []IssuedCred, session bool) {
+func (r *credRegistry) scan(texts ...string) (creds []issuedCred, session bool) {
 	var candidates []string
 	for _, text := range texts {
 		candidates = appendCandidates(candidates, text)
@@ -84,7 +84,7 @@ func (r *credRegistry) scan(texts ...string) (creds []IssuedCred, session bool) 
 			continue
 		}
 		seen[value] = struct{}{}
-		if cred.Label == sessionLabel {
+		if cred.label == sessionLabel {
 			session = true
 		} else {
 			creds = append(creds, cred)
@@ -179,7 +179,7 @@ func cleanText(s string, max int) string {
 // inspection 一次请求中与假凭据有关的发现
 type inspection struct {
 	login   *loginAttempt // 提交的登录凭据（表单、Basic 认证或 XML-RPC）
-	reused  []IssuedCred  // 请求中出现的、由本服务签发的假凭据
+	reused  []issuedCred  // 请求中出现的、由本服务签发的假凭据
 	session bool          // 请求带有本服务签发的假会话
 }
 

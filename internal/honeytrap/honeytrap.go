@@ -1,8 +1,9 @@
 // Package honeytrap 识别扫描器常探测的路径并按来源计分：
 // 规则表（rules.go）给路径定权重，漏桶（score.go）按来源累计分数，
 // 本文件按分数分级响应——延迟（tarpit）、伪造内容（bait.go）、标记、软封禁。
-// 伪造内容中的假凭据会被登记（creds.go），之后在请求中再次出现时即可认出；
-// 全部过程以事件形式输出（events.go）。
+// 伪造内容中的假凭据会被登记（creds.go），之后在请求中再次出现时即可认出。
+// 被标记的来源进入蜜罐自己的风险列表（flaglist.go），可落盘并在实例间共享；
+// 列表、文件和事件日志（events.go）里的来源都经过混淆（obfuscate.go）。
 package honeytrap
 
 import (
@@ -13,6 +14,7 @@ import (
 	"math"
 	mrand "math/rand/v2"
 	"net/http"
+	"net/netip"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -24,17 +26,14 @@ import (
 const Source = "honeytrap"
 
 const (
-	scoredKey   = "honeytrap_scored" // gin.Context 键：本次请求已由 Middleware 计分
-	maxDelaying = 1024               // 同时处于延迟中的请求上限，超出后不再延迟，避免拖住自身
-
-	maxEventPathLen = 512 // 事件中保留的路径与 UA 长度
-	maxEventUALen   = 256
+	scoredKey       = "honeytrap_scored" // gin.Context 键：本次请求已由 Middleware 计分
+	maxDelaying     = 1024               // 同时处于延迟中的请求上限，超出后不再延迟，避免拖住自身
+	maxEventPathLen = 512                // 事件中保留的路径长度
 )
 
-// Config 规则、延迟、伪造内容与分级策略
+// Config 延迟、伪造内容、分级策略与标记的保存方式
 type Config struct {
 	Enabled        bool
-	Rules          []Rule // 为 nil 时使用 DefaultRules
 	BaseDelayMinMS int
 	BaseDelayMaxMS int
 	MaxPenaltyMS   int
@@ -51,14 +50,16 @@ type Config struct {
 
 	MaxOffenders int // 最多跟踪的来源数，超出后淘汰最久未活动的来源
 
-	Sink Sink // 可选：接收全部蜜罐事件，用于持久化；为 nil 时事件只写日志
+	// Secret 混淆来源所用的密钥。为空时使用随机密钥：日志里的标识重启后无法还原，
+	// 也不会写标记文件
+	Secret string
+	// FlagFile 保存被标记来源的文件（JSON Lines）；为空时标记只在内存中。
+	// 多个实例使用相同的 Secret 并共用这个文件即可共享标记
+	FlagFile string
 }
 
 // withDefaults 为未设置的字段填充默认值
 func (cfg Config) withDefaults() Config {
-	if cfg.Rules == nil {
-		cfg.Rules = DefaultRules()
-	}
 	if cfg.BaseDelayMinMS <= 0 {
 		cfg.BaseDelayMinMS = 40
 	}
@@ -91,13 +92,15 @@ func (cfg Config) withDefaults() Config {
 	return cfg
 }
 
-// Trap 蜜罐实例，持有规则表、来源分数与指标
+// Trap 蜜罐实例，持有规则表、来源分数、风险列表与指标
 type Trap struct {
 	cfg    Config
 	log    *slog.Logger
 	rules  *RuleSet
 	scores *scorer
 	creds  *credRegistry // 已签发的假凭据，用于在后续请求中认出它们
+	obf    *obfuscator
+	flags  *flagList // 被标记的来源（混淆后）
 
 	hashSeed  maphash.Seed // 路径去重与伪造决策
 	tokenSeed []byte       // 假凭据，进程内保持不变
@@ -106,7 +109,7 @@ type Trap struct {
 	hits      atomic.Uint64
 	fakeOK    atomic.Uint64
 	blocks    atomic.Uint64
-	flags     atomic.Uint64
+	flagged   atomic.Uint64
 	logins    atomic.Uint64
 	reuses    atomic.Uint64
 	penaltyMS atomic.Uint64
@@ -126,15 +129,25 @@ type Stats struct {
 	Issued    int    `json:"issued_credentials_cnt"`
 }
 
-// New 创建蜜罐
+// New 创建蜜罐；启用且配置了标记文件时读回其中未到期的标记
 func New(cfg Config, log *slog.Logger) *Trap {
 	cfg = cfg.withDefaults()
+	if cfg.Enabled && cfg.Secret == "" {
+		log.Warn("HONEYTRAP_SECRET is not set: obfuscated sources in honeytrap logs cannot be revealed after a restart")
+		if cfg.FlagFile != "" {
+			log.Warn("HONEYTRAP_FLAG_FILE is ignored without HONEYTRAP_SECRET", "path", cfg.FlagFile)
+			cfg.FlagFile = ""
+		}
+	}
+	if !cfg.Enabled {
+		cfg.FlagFile = ""
+	}
 	tokenSeed := make([]byte, 16)
 	_, _ = rand.Read(tokenSeed)
-	return &Trap{
+	t := &Trap{
 		cfg:   cfg,
 		log:   log,
-		rules: NewRuleSet(cfg.Rules),
+		rules: NewRuleSet(DefaultRules()),
 		scores: newScorer(scoreConfig{
 			flagThreshold:  float64(cfg.FlagThreshold),
 			blockThreshold: float64(cfg.BlockThreshold),
@@ -145,24 +158,32 @@ func New(cfg Config, log *slog.Logger) *Trap {
 			maxSources:     cfg.MaxOffenders,
 		}),
 		creds:     newCredRegistry(maxIssuedCreds),
+		obf:       newObfuscator(cfg.Secret),
+		flags:     newFlagList(cfg.FlagFile, cfg.MaxOffenders, cfg.FlagDuration/2, log),
 		hashSeed:  maphash.MakeSeed(),
 		tokenSeed: tokenSeed,
 	}
+	if cfg.FlagFile != "" {
+		now := time.Now()
+		t.flags.sync(now)
+		t.flags.compact(now)
+		log.Info("honeytrap flag file loaded", "path", cfg.FlagFile, "flagged_sources", t.flags.len())
+	}
+	return t
 }
 
 // Stats 返回指标快照
 func (t *Trap) Stats() Stats {
-	tracked, flagged := t.scores.counts(time.Now())
 	return Stats{
 		Hits:      t.hits.Load(),
 		FakeOK:    t.fakeOK.Load(),
 		Blocks:    t.blocks.Load(),
-		Flags:     t.flags.Load(),
+		Flags:     t.flagged.Load(),
 		Logins:    t.logins.Load(),
 		Reuses:    t.reuses.Load(),
 		PenaltyMS: t.penaltyMS.Load(),
-		Offenders: tracked,
-		Flagged:   flagged,
+		Offenders: t.scores.len(),
+		Flagged:   t.flags.len(),
 		Issued:    t.creds.len(),
 	}
 }
@@ -172,16 +193,46 @@ func (t *Trap) Rules() *RuleSet {
 	return t.rules
 }
 
-// Flagged 判断 IP 所属来源当前是否被蜜罐标记，供风险判定使用；IPv6 按 /64 归并
+// Flagged 判断 IP 所属来源当前是否在蜜罐的风险列表中，供风险判定使用；IPv6 按 /64 归并
 func (t *Trap) Flagged(ip string) bool {
 	if !t.cfg.Enabled {
 		return false
 	}
 	key, ok := sourceKey(ip)
-	return ok && t.scores.flagged(key, time.Now())
+	return ok && t.flags.has(t.obf.hide(key), time.Now())
 }
 
-// RunJanitor 定期清理分数已漏空且未被标记的来源；ctx 取消时退出
+// FlaggedSource 蜜罐风险列表中的一项
+type FlaggedSource struct {
+	ID    string    // 混淆后的来源，与蜜罐日志中的 source 字段一致
+	Until time.Time // 标记到期时间
+}
+
+// FlaggedSources 返回当前被标记的全部来源（混淆后），按标识排序
+func (t *Trap) FlaggedSources() []FlaggedSource {
+	recs := t.flags.snapshot(time.Now())
+	out := make([]FlaggedSource, len(recs))
+	for i, rec := range recs {
+		out[i] = FlaggedSource{ID: rec.Source, Until: rec.Until}
+	}
+	return out
+}
+
+// Reveal 把日志或标记文件中混淆后的来源还原为地址（IPv4）或网段（IPv6 /64）。
+// 标识无效，或不是用当前密钥生成的，返回 false
+func (t *Trap) Reveal(source string) (string, bool) {
+	addr, ok := t.obf.reveal(source)
+	if !ok {
+		return "", false
+	}
+	if addr.Is6() {
+		return netip.PrefixFrom(addr, 64).String(), true
+	}
+	return addr.String(), true
+}
+
+// RunJanitor 定期清理不再需要跟踪的来源和已到期的标记，并读入其他实例写入标记文件的新标记；
+// ctx 取消时退出
 func (t *Trap) RunJanitor(ctx context.Context) {
 	ticker := time.NewTicker(t.cfg.BlockWindow)
 	defer ticker.Stop()
@@ -191,8 +242,34 @@ func (t *Trap) RunJanitor(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			t.scores.prune(now)
+			t.flags.prune(now)
+			t.flags.sync(now)
 		}
 	}
+}
+
+// hit 一次被计分的请求
+type hit struct {
+	ip   string
+	key  netip.Addr // 计分来源；ok 为 false 时无效
+	ok   bool
+	path string // 原始请求路径
+	ev   event
+}
+
+// newHit 填好一次请求的公共字段；写入事件的客户端输入在这里统一清洗，来源在这里混淆
+func (t *Trap) newHit(c *gin.Context, ip, rule string) hit {
+	h := hit{ip: ip, path: c.Request.URL.Path}
+	h.ev = event{
+		time:   time.Now(),
+		method: cleanText(c.Request.Method, 16),
+		path:   cleanText(h.path, maxEventPathLen),
+		rule:   rule,
+	}
+	if h.key, h.ok = sourceKey(ip); h.ok {
+		h.ev.source = t.obf.hide(h.key)
+	}
+	return h
 }
 
 // Middleware 返回 gin 中间件：命中规则的请求按权重计分，随后延迟并返回伪造内容；
@@ -213,40 +290,40 @@ func (t *Trap) Middleware(clientIP func(*gin.Context) string) gin.HandlerFunc {
 		c.Set(scoredKey, true)
 
 		ip := clientIP(c)
-		ev := t.newEvent(c, ip, rule.Name)
+		h := t.newHit(c, ip, rule.Name)
 		baiting := rule.Bait != BaitNone && t.shouldBait(ip, path)
 
 		// 只有要返回伪造内容时才查看请求内容：查找登录尝试，以及本服务签发过的假凭据
 		var in inspection
 		if baiting {
 			in = t.creds.inspect(c.Request)
-			ev.Session = in.session
+			h.ev.session = in.session
 		}
 		// 正在使用假凭据或假会话的来源已经被标记，后续交互只按重复计分，让它继续暴露行为
 		weight := rule.Weight
 		if in.engaged() {
 			weight = min(weight, repeatWeight)
 		}
-		out := t.score(&ev, path, weight)
-		t.recordCredentials(ev, in)
-		if t.reject(c, ev, out) {
+		out := t.score(&h, weight)
+		t.recordCredentials(h, in)
+		if t.reject(c, h, out) {
 			return
 		}
 
 		// 延迟：基础随机 + 惩罚（随已有分数指数增长并封顶）
-		ev.SleepMS = jitter(cfg.BaseDelayMinMS, cfg.BaseDelayMaxMS) + backoffPenalty(out.prior, cfg.MaxPenaltyMS)
+		h.ev.sleepMS = jitter(cfg.BaseDelayMinMS, cfg.BaseDelayMaxMS) + backoffPenalty(out.prior, cfg.MaxPenaltyMS)
 		t.hits.Add(1)
-		if t.delay(c.Request.Context(), ev.SleepMS) {
-			t.penaltyMS.Add(uint64(ev.SleepMS))
+		if t.delay(c.Request.Context(), h.ev.sleepMS) {
+			t.penaltyMS.Add(uint64(h.ev.sleepMS))
 		} else {
-			ev.SleepMS = 0
+			h.ev.sleepMS = 0
 		}
 
 		if baiting {
 			tok := tokens{seed: t.tokenSeed, source: ip, issue: func(label, value string) {
-				t.creds.issue(value, IssuedCred{Label: label, Source: ip, At: ev.Time})
-				if label != sessionLabel && !slices.Contains(ev.Issued, label) {
-					ev.Issued = append(ev.Issued, label)
+				t.creds.issue(value, issuedCred{label: label, source: h.ev.source, at: h.ev.time})
+				if label != sessionLabel && !slices.Contains(h.ev.issued, label) {
+					h.ev.issued = append(h.ev.issued, label)
 				}
 			}}
 			resp, ok := render(rule.Bait, baitRequest{
@@ -260,15 +337,15 @@ func (t *Trap) Middleware(clientIP func(*gin.Context) string) gin.HandlerFunc {
 			})
 			if ok {
 				t.fakeOK.Add(1)
-				ev.Kind, ev.Status = EventBait, resp.status
-				t.emit(ev)
+				h.ev.kind, h.ev.status = eventBait, resp.status
+				t.emit(h.ev)
 				serveBait(c, resp)
 				return
 			}
 		}
 
-		ev.Kind = EventTarpit
-		t.emit(ev)
+		h.ev.kind = eventTarpit
+		t.emit(h.ev)
 		c.Next()
 	}
 }
@@ -280,57 +357,42 @@ func (t *Trap) NotFound(clientIP func(*gin.Context) string) gin.HandlerFunc {
 		if !t.cfg.Enabled || c.GetBool(scoredKey) {
 			return
 		}
-		ev := t.newEvent(c, clientIP(c), "not-found")
-		t.reject(c, ev, t.score(&ev, c.Request.URL.Path, WeightLow))
+		h := t.newHit(c, clientIP(c), "not-found")
+		t.reject(c, h, t.score(&h, WeightLow))
 	}
 }
 
-// newEvent 填好一次请求的公共字段；客户端输入在这里统一清洗
-func (t *Trap) newEvent(c *gin.Context, ip, rule string) Event {
-	ev := Event{
-		Time:      time.Now(),
-		IP:        ip,
-		Method:    cleanText(c.Request.Method, 16),
-		Path:      cleanText(c.Request.URL.Path, maxEventPathLen),
-		Rule:      rule,
-		UserAgent: cleanText(c.Request.UserAgent(), maxEventUALen),
-	}
-	if key, ok := sourceKey(ip); ok {
-		ev.Source = key.String()
-	}
-	return ev
-}
-
-// score 为来源记一次命中，把结果写回事件，并处理标记状态的变化；无法解析的 IP 不计分。
-// 路径去重用未截断的原始路径，避免超长路径共用同一个哈希
-func (t *Trap) score(ev *Event, path string, weight float64) outcome {
-	key, ok := sourceKey(ev.IP)
-	if !ok {
+// score 为来源记一次命中，把分数写回事件，并在来源处于标记期时更新风险列表；
+// 无法解析的 IP 不计分
+func (t *Trap) score(h *hit, weight float64) outcome {
+	if !h.ok {
 		return outcome{}
 	}
-	out := t.scores.observe(key, maphash.String(t.hashSeed, path), weight, ev.Time)
-	ev.Score = out.score
-	if out.newlyFlagged {
-		t.flagged(*ev)
+	out := t.scores.observe(h.key, maphash.String(t.hashSeed, h.path), weight, h.ev.time)
+	h.ev.score = out.score
+	if !out.flagUntil.IsZero() {
+		t.flag(*h, out.flagUntil, out.newlyFlagged)
 	}
 	return out
 }
 
-func (t *Trap) flagged(ev Event) {
-	t.flags.Add(1)
-	until := ev.Time.Add(t.cfg.FlagDuration)
-	ev.Kind, ev.Until = EventFlagged, &until
-	t.emit(ev)
+// flag 把来源记入风险列表（已在其中时延后到期时间）；首次标记时输出事件
+func (t *Trap) flag(h hit, until time.Time, newly bool) {
+	t.flags.flag(h.ev.source, until, h.ev.time)
+	if newly {
+		t.flagged.Add(1)
+		h.ev.kind, h.ev.until = eventFlagged, until
+		t.emit(h.ev)
+	}
 }
 
 // recordCredentials 记录登录尝试与假凭据重用。
 // 重用本服务签发的假凭据是确定的恶意信号：不论分数多少，使用它的来源立即被标记
-func (t *Trap) recordCredentials(ev Event, in inspection) {
+func (t *Trap) recordCredentials(h hit, in inspection) {
 	if in.login != nil {
 		t.logins.Add(1)
-		e := ev
-		e.Kind = EventLoginAttempt
-		e.Username, e.PasswordHash, e.PasswordLen = in.login.username, in.login.passwordHash(), len(in.login.password)
+		e := h.ev
+		e.kind, e.login = eventLoginAttempt, in.login
 		t.emit(e)
 	}
 	if len(in.reused) == 0 {
@@ -338,27 +400,29 @@ func (t *Trap) recordCredentials(ev Event, in inspection) {
 	}
 	for _, cred := range in.reused {
 		t.reuses.Add(1)
-		e := ev
-		e.Kind = EventCredentialReuse
-		e.Credential, e.IssuedTo, e.IssuedAt = cred.Label, cred.Source, &cred.At
+		e := h.ev
+		e.kind = eventCredentialReuse
+		e.credential, e.issuedTo, e.issuedAt = cred.label, cred.source, cred.at
 		t.emit(e)
 	}
-	if key, ok := sourceKey(ev.IP); ok && t.scores.mark(key, ev.Time) {
-		t.flagged(ev)
+	if h.ok {
+		if until, newly := t.scores.mark(h.key, h.ev.time); !until.IsZero() {
+			t.flag(h, until, newly)
+		}
 	}
 }
 
 // reject 来源处于封禁期（或本次命中触发封禁）时返回 429 并中止请求
-func (t *Trap) reject(c *gin.Context, ev Event, out outcome) bool {
+func (t *Trap) reject(c *gin.Context, h hit, out outcome) bool {
 	if !out.blocked && !out.newlyBlocked {
 		return false
 	}
 	t.blocks.Add(1)
-	ev.Kind, ev.Until = EventSoftBlock, &out.blockUntil
+	h.ev.kind, h.ev.until = eventSoftBlock, out.blockUntil
 	if out.blocked {
-		ev.Kind = EventBlock
+		h.ev.kind = eventBlock
 	}
-	t.emit(ev)
+	t.emit(h.ev)
 	c.AbortWithStatus(http.StatusTooManyRequests)
 	return true
 }

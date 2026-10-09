@@ -16,8 +16,12 @@ services:
         required: false
     environment:
       LOG_FORMAT: json
-    # 运行期不写文件系统，风险 IP 列表与缓存都在内存中
+      # 被蜜罐标记的来源保存在卷里，重启后保留；需要同时在 .env 中设置 HONEYTRAP_SECRET 才会生效
+      HONEYTRAP_FLAG_FILE: /var/lib/riskapi/honeytrap-flagged.jsonl
+    # 根文件系统只读；唯一可写的是下面的卷，用于保存蜜罐标记
     read_only: true
+    volumes:
+      - riskapi-state:/var/lib/riskapi
     cap_drop:
       - ALL
     security_opt:
@@ -40,3 +44,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  riskapi-state:
