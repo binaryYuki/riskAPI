@@ -42,6 +42,8 @@ jobs:
     env:
       # 仅 master 上的 push / schedule / 手动运行才推送镜像、更新 Release、部署
       DEPLOY: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
+      # 来自 fork 的 PR 拿不到 secrets，用占位命名空间保证镜像 tag 合法（此时只构建、不推送）
+      IMAGE: ${{ secrets.DOCKER_USERNAME || 'local' }}/risk-api
 
     steps:
       - name: Checkout code
@@ -95,8 +97,8 @@ jobs:
           push: ${{ env.DEPLOY == 'true' }}
           platforms: linux/amd64,linux/arm64
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/risk-api:${{ github.run_id }}
-            ${{ secrets.DOCKER_USERNAME }}/risk-api:latest
+            ${{ env.IMAGE }}:${{ github.run_id }}
+            ${{ env.IMAGE }}:latest
 
       # 镜像推送成功后，把本次使用的数据库保存为新的“最近成功版本”
       - name: Update geo-data release

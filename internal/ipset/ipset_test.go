@@ -27,6 +27,31 @@ func TestSet_LongestPrefixMatch(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// InsertPrefix 不要求调用方先规范化：未清零主机位、IPv4-mapped 的前缀都应能被查到
+func TestSet_InsertPrefixNormalizes(t *testing.T) {
+	s := New()
+	assert.True(t, s.InsertPrefix(netip.MustParsePrefix("1.2.3.4/24"), "unmasked"))
+	assert.True(t, s.InsertPrefix(netip.MustParsePrefix("::ffff:5.6.7.0/120"), "mapped"))
+	assert.False(t, s.InsertPrefix(netip.MustParsePrefix("::ffff:5.6.7.0/64"), "too-wide"))
+	assert.False(t, s.InsertPrefix(netip.Prefix{}, "invalid"))
+
+	got, ok := s.Lookup("1.2.3.200")
+	assert.True(t, ok)
+	assert.Equal(t, "unmasked", got)
+	got, ok = s.Lookup("5.6.7.8")
+	assert.True(t, ok)
+	assert.Equal(t, "mapped", got)
+	assert.Equal(t, 2, s.Len())
+
+	// 与字符串入口写入的是同一个前缀
+	viaString := New()
+	viaString.Insert("1.2.3.4/24", "x")
+	for p := range viaString.All() {
+		_, exists := s.table.Get(p)
+		assert.True(t, exists, p)
+	}
+}
+
 func TestSet_IPv4MappedAndIPv6(t *testing.T) {
 	s := New()
 	s.Insert("1.2.3.0/24", "v4")

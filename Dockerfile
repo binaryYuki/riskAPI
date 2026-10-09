@@ -74,6 +74,8 @@ RUN --mount=type=cache,target=/var/cache/apk \
 # Create non-root user
 ARG UID=10001
 RUN adduser -S -u ${UID} appuser
+# 蜜罐标记文件所在目录（compose 中挂载为卷）；预先创建并交给 appuser，新建的卷会沿用这个属主
+RUN mkdir -p /var/lib/riskapi && chown appuser /var/lib/riskapi
 USER appuser
 
 # Copy binary and data

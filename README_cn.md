@@ -23,10 +23,14 @@
 - **结果聚合**: 多数据源结果统一格式输出
 
 ### 🛡️ 蜜罐防护系统
-- **可疑路径检测**: 识别对敏感路径的访问尝试
-- **自适应延迟**: 对可疑请求实施渐进式延迟惩罚
-- **软封机制**: 基于频次的临时封禁策略
-- **诱饵路由**: 可选的蜜罐路由部署
+- **带权重的规则表**: 一张常被扫描路径的规则表，每条规则有权重（凭据、版本库为高，后台、脚本为中，未知404为低）
+- **按来源计分**: 每个来源一个带权重的漏桶，按不同路径去重；IPv4按单个地址，IPv6按/64
+- **自适应延迟**: 随机基础延迟，并随来源分数追加指数增长的惩罚延迟
+- **高仿假内容**: 命中规则的请求得到与真实内容相似的响应（`.env`、Git元数据、WordPress / phpMyAdmin登录页、SQL导出等）
+- **多步欺骗**: 伪造的登录页接受提交；用假内容里的凭据登录会"成功"，并进入伪造的后台
+- **假凭据回收**: 发出的每个假凭据都会登记，之后在任何蜜罐请求中再次出现时都能认出，并追溯到当初拿走它的来源
+- **来源标记**: 分数达到标记阈值的来源会被IP检测接口判为风险
+- **软封机制**: 分数达到封禁阈值后返回429
 
 ### 🚀 CDN/IDC识别
 - **主流CDN**: 支持Cloudflare、Fastly、腾讯云EdgeOne等
@@ -72,7 +76,7 @@ go mod tidy
 # 4. 配置环境变量 (可选)
 export ALLOWED_CORS="yourdomain.com,anotherdomain.com"
 export HONEYTRAP_ENABLED=true
-export HONEYTRAP_DECOYS=true
+export HONEYTRAP_FLAG_THRESHOLD=8
 
 # 5. 启动服务
 go run ./cmd/server
@@ -105,14 +109,21 @@ docker-compose up -d
 | 变量名 | 描述 | 默认值 |
 |--------|------|--------|
 | `ALLOWED_CORS` | 允许的CORS域名，逗号分隔 | `catyuki.com,tzpro.xyz` |
-| `HONEYTRAP_ENABLED` | 是否启用蜜罐防护 | `false` |
-| `HONEYTRAP_DECOYS` | 是否启用诱饵路由 | `false` |
-| `HONEYTRAP_BASE_DELAY_MIN_MS` | 蜜罐最小延迟(毫秒) | `100` |
-| `HONEYTRAP_BASE_DELAY_MAX_MS` | 蜜罐最大延迟(毫秒) | `500` |
-| `HONEYTRAP_BLOCK_THRESHOLD` | 封禁阈值(次数) | `5` |
-| `HONEYTRAP_BLOCK_DURATION` | 封禁时长(秒) | `300` |
-| `HONEYTRAP_MAX_OFFENDERS` | 蜜罐最多跟踪的来源数 | `100000` |
-| `ADMIN_TOKEN` | `/api/cache/flush*` 的 Bearer 令牌；未设置时管理接口禁用 | _(未设置)_ |
+| `HONEYTRAP_ENABLED` | 是否启用蜜罐防护 | `true` |
+| `HONEYTRAP_BASE_DELAY_MIN_MS` | 命中规则的最小基础延迟(毫秒) | `40` |
+| `HONEYTRAP_BASE_DELAY_MAX_MS` | 命中规则的最大基础延迟(毫秒) | `220` |
+| `HONEYTRAP_MAX_PENALTY_MS` | 随来源分数追加的延迟上限(毫秒) | `1200` |
+| `HONEYTRAP_FAKEOK` | 命中规则时返回假内容的概率(0-1)；按来源和路径确定，重复请求结果一致。设为 `0` 则返回真实的 403/404 | `1` |
+| `HONEYTRAP_LOG` | 是否记录每次蜜罐命中（来源被标记时始终记录） | `true` |
+| `HONEYTRAP_FLAG_THRESHOLD` | 来源被标记为风险的分数（高权重规则 8 分，中权重 4 分，未知 404 为 1 分） | `8` |
+| `HONEYTRAP_FLAG_DURATION_SEC` | 最后一次达标命中后标记保留的时长(秒) | `3600` |
+| `HONEYTRAP_BLOCK_THRESHOLD` | 触发软封的分数 | `16` |
+| `HONEYTRAP_BLOCK_WINDOW_SEC` | 等于封禁阈值的分数完全漏空所需时间(秒) | `60` |
+| `HONEYTRAP_BLOCK_DURATION_SEC` | 软封时长(秒) | `180` |
+| `HONEYTRAP_MAX_OFFENDERS` | 蜜罐最多跟踪的来源数；表满时淘汰最久未活动的来源 | `100000` |
+| `HONEYTRAP_SECRET` | 混淆蜜罐日志和标记文件中来源地址、以及封存命中蜜罐的访问日志行所用的密钥。未设置时使用随机密钥：来源标识和封存的日志行重启后无法还原，也不会写标记文件 | _(未设置)_ |
+| `HONEYTRAP_FLAG_FILE` | 保存被标记来源的文件（JSON Lines），使标记在重启后保留；需要同时设置 `HONEYTRAP_SECRET`。使用相同密钥并共用该文件的实例共享标记 | _(未设置；`compose.yaml` 中设为卷内路径)_ |
+| `ADMIN_TOKEN` | `/api/cache/flush*` 与 `/api/honeytrap/*` 的 Bearer 令牌；未设置时管理接口禁用 | _(未设置)_ |
 | `TRUSTED_PROXIES` | 允许读取转发头的可信代理 CIDR/IP，逗号分隔（已知 CDN 网段始终可信） | 回环 + 私网网段 |
 | `PARSE_VV_SECRET` | `/api/v1/parse` 的 HMAC 签名密钥；未设置时接口返回 503 | _(未设置)_ |
 | `PARSE_WORKER_BASE` | 上游解析 Worker 地址 | `https://xhs-proxy.tzpro.workers.dev` |
@@ -151,7 +162,7 @@ GET /api/v1/ip
 }
 ```
 
-`isRisky` 仅在命中风险列表时为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
+`isRisky` 在命中风险列表或被本服务蜜罐标记（来源名为 `honeytrap`）时为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
 
 ### 2. 地理位置查询 (新功能)
 ```bash
@@ -251,6 +262,53 @@ GET /api/cache/flush
 POST /api/cache/flush/{method}/{range}
 ```
 
+### 7. 蜜罐日志还原
+蜜罐日志用混淆后的标识表示来源，命中蜜罐规则的请求的访问日志行是封存的。这两个接口用于还原。认证方式与缓存管理相同；只对当前 `HONEYTRAP_SECRET` 生成的内容有效。
+```bash
+# 混淆的来源标识 -> 地址（IPv4）或网段（IPv6 /64）
+GET /api/honeytrap/source/{id}
+
+# 封存的访问日志行 -> 原始字段（请求体每行一个 sealed 值）
+POST /api/honeytrap/unseal
+```
+
+#### 离线还原：`scripts/honeytrap-reveal.py`
+持有 `HONEYTRAP_SECRET` 的人不需要服务在运行、也不需要管理令牌，就能完成同样的事。这个脚本是一个文本过滤器：把输入原样写到标准输出，其中认得出的来源标识和封存的行替换成原文，其余内容不动。行数、顺序以及 JSON 日志的合法性都保持不变，所以输出可以直接接到你已有的工具上。
+
+**依赖**：Python 3.8+ 和 `cryptography` 包（`pip install cryptography`）。
+
+**密钥**：从环境变量 `HONEYTRAP_SECRET` 读取，或用 `--env-file` 指向部署所用的 `.env`；不接受从命令行参数传入。必须是这些数据写入时服务所用的密钥。
+
+```bash
+export HONEYTRAP_SECRET=...                  # 或在每条命令后加 --env-file .env
+
+# 日志：蜜罐事件行换回真实来源，封存的访问日志行换回各字段
+docker compose logs --no-log-prefix server | scripts/honeytrap-reveal.py > revealed.log
+
+# 只看蜜罐相关的活动
+docker compose logs --no-log-prefix server | scripts/honeytrap-reveal.py | grep -E 'honeytrap |/\.env'
+
+# 被标记的来源列表：来自标记文件，或来自导出
+docker compose exec server cat /var/lib/riskapi/honeytrap-flagged.jsonl | scripts/honeytrap-reveal.py
+curl -s https://your-host/api/export | grep '^# honeytrap' | scripts/honeytrap-reveal.py
+
+# 直接处理文件
+scripts/honeytrap-reveal.py --env-file .env app.log.1 app.log.2
+```
+
+输出中发生变化的内容：
+
+| 输入 | 输出 |
+|---|---|
+| `"source":"803c4091c04865c83877ddd1dbc1d70f"` | `"source":"73.162.10.99"`（IPv6 来源还原为 `/64`，如 `2a0e:b107:1:2::/64`） |
+| `"issued_to":"<标识>"`、`# honeytrap <标识> until ...`、标记文件中的行 | 同样替换 |
+| `{"msg":"request","sealed":"7-wjuG..."}` | `{"msg":"request","method":"GET","path":"/.env","status":200,"latency":"156ms","client_ip":"73.162.10.99","correlation_id":"..."}` |
+| `LOG_FORMAT=text` 下带 `sealed=...` 的行 | `method=GET path=/.env status=200 ...` |
+
+处理结果的汇总（`revealed N source id(s) and M sealed access log line(s)`）输出到标准错误。有封存的行无法解密时以非零状态退出，这说明密钥不对或该行被改动过。来源标识单独出现时无法判断密钥是否正确：它们会保持原样，汇总里显示 `0 source id(s)`。
+
+限制：提交的密码无法还原（日志里从来只有长度和截断的哈希）；用另一个密钥写入的数据需要用那个密钥。
+
 ## 性能特性
 
 ### 缓存策略
@@ -274,10 +332,21 @@ POST /api/cache/flush/{method}/{range}
 ## 安全特性
 
 ### 蜜罐防护
-- **路径检测**: 自动识别对管理后台的访问尝试
-- **行为分析**: 基于User-Agent和访问模式的异常检测  
-- **渐进惩罚**: 首次警告，重复访问逐步增加延迟
-- **智能封禁**: 短期软封禁机制，避免误封正常用户
+- **规则**: 仅按请求路径判定，不检查User-Agent和请求体。规则按完整的路径段或文件名匹配（`/login` 命中，`/login-help` 不命中），并带有权重：正常用户不会请求的内容为高权重(8)，如 `.env`、`.git`、SSH密钥、SQL导出；管理后台、CMS登录、运维面板和 `.php`/`.asp`/`.jsp` 脚本为中权重(4)；其余的404为低权重(1)
+- **计分**: 每个来源一个漏桶。新路径按规则权重加分，桶内已出现过的路径只加0.25分，漏桶每秒漏掉 `HONEYTRAP_BLOCK_THRESHOLD / HONEYTRAP_BLOCK_WINDOW_SEC` 分。IPv4按单个地址计分，IPv6按/64计分
+- **分级响应**:
+  - 命中规则即延迟（延迟随分数增长），并返回针对该路径生成的假内容。假凭据按来源唯一且保持不变
+  - 达到标记阈值后记下该来源：在标记时长内，`/api/v1/ip` 和 `/filter-proxies` 将其判为风险（来源名 `honeytrap`）。已知CDN网段不会因此被判为风险
+  - 达到封禁阈值后，该来源在封禁时长内访问规则路径和不存在的路径一律返回429；真实API路由不受影响
+- **多步欺骗**: 伪造的 WordPress、phpMyAdmin、通用后台和 Tomcat Manager（HTTP Basic）入口接受凭据提交。错误的凭据得到对应产品的常见错误页；提交的是本服务假内容里的凭据（如假 `.env` 中的 `DB_PASSWORD`、`ADMIN_PASSWORD`）时"登录成功"：发放假会话 Cookie，并展示伪造的后台页面
+- **假凭据回收**: 假凭据按来源生成，返回时登记（最多 50,000 个，先淘汰最早登记的）。在蜜罐路径上会检查查询串、`Cookie`、`Authorization` 以及最多 8 KiB 的请求体。命中时同时记录使用该凭据的来源和当初拿到它的来源，并且不论分数多少立即标记使用方。正在使用假凭据或假会话的来源只按重复计分，交互不会被封禁阈值打断
+- **安全边界**: 只在将要返回假内容的蜜罐路径上查看请求内容，真实API路由从不查看；内容只做查找，不执行、不转发。回显到假页面的客户端输入会做HTML转义并截断，重定向只指向本站路径，假会话在蜜罐之外没有任何作用。提交的密码不以明文保存或写入日志，只保留长度和截断的 SHA-256
+- **事件**: 每一步（`bait`、`tarpit`、`login_attempt`、`credential_reuse`、`flagged`、`soft_block`、`block`）都输出为一行结构化日志（`honeytrap <类型>`）
+- **来源混淆**: 蜜罐日志和标记文件里不出现客户端地址。每个来源（IPv4地址或IPv6 /64）显示为一个32位的标识，由 `HONEYTRAP_SECRET` 派生的密钥加密得到。同一来源的标识始终相同，可以跨日志行、跨实例比对和关联。持有密钥时可以把标识还原为地址：`GET /api/honeytrap/source/{id}`（需要管理令牌）。
+- **访问日志封存**: 请求命中蜜罐规则时，它的访问日志行（`msg=request`）不再输出各个字段，而是整行加密成一个字符串 `sealed=<...>`，日志里任何地方都不再有这次请求的明文地址和路径。`POST /api/honeytrap/unseal`（需要管理令牌；请求体每行一个 sealed 值）返回原始字段。没有命中规则的请求照常记录。这能让读日志的人看不到地址；但它隐藏不了"哪些路径是陷阱"：规则表就在这个公开仓库里，而且 `honeytrap ...` 事件行本身写着路径和规则名
+- **蜜罐风险列表**: 被标记的来源保存在一张以混淆标识为键的列表中，`/api/v1/ip` 和 `/filter-proxies` 查询的就是它。`/api/export` 会把这张列表以注释行的形式附在末尾（`# honeytrap <标识> until <时间>`），按 CIDR 解析的使用方不受影响；数量见响应头 `X-Honeytrap-Count`。设置了 `HONEYTRAP_FLAG_FILE` 时，每个新标记追加写入该文件，启动时读回未到期的标记；共用该文件的实例会在一个 `HONEYTRAP_BLOCK_WINDOW_SEC` 内看到彼此的标记。更换密钥后，已有条目只是无法再匹配，不会错标到别的地址
+- **自我保护**: 来源表有上限（优先淘汰最久未活动的来源，被标记的来源最后淘汰），同时处于延迟中的请求最多1024个
+- **状态**: 配置了标记文件时，标记在重启后保留。分数、软封和假凭据登记表只保存在内存中，各实例独立，重启后清空
 
 ### 访问控制
 - **CORS策略**: 严格的跨域访问控制
@@ -343,7 +412,7 @@ services:
 │   ├── ipset/           # 最长前缀匹配 IP 表（bart）、bogon 判断
 │   ├── netlists/        # CDN / IDC（云厂商）网段列表
 │   ├── geo/             # 地理位置聚合（MMDB、纯真、美团、IP.SB）
-│   ├── honeytrap/       # 蜜罐中间件与诱饵路由
+│   ├── honeytrap/       # 蜜罐：规则表、按来源计分、假内容、来源标记
 │   └── cache/           # 带 TTL 与容量上限的缓存
 ├── providers/           # 地理位置数据库（MMDB、qqwry.dat，CI 每日更新）
 └── data/                # 静态数据
@@ -365,13 +434,15 @@ services:
 4. 推送分支 (`git push origin feature/amazing-feature`)  
 5. 创建Pull Request
 
+本地环境准备，以及来自 fork 的 PR 上 CI 会执行哪些步骤，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ## FAQ
 
 **Q: 为什么地理位置查询结果不一致？**  
 A: 不同数据源的更新频率和数据来源不同，建议综合多个结果判断。
 
 **Q: 蜜罐系统会影响正常用户吗？**  
-A: 蜜罐只对访问敏感路径的请求生效，正常API调用不受影响。
+A: 正常API调用不会被延迟或封禁。只有请求规则表中的路径或不存在的路径才会计分，偶尔的几个404（如 `/favicon.ico`）远低于阈值。需要注意：被标记的来源对所有查询方都显示为风险，共享出口IP的用户会被一起影响。
 
 **Q: 如何自定义风险IP列表？**  
 A: 可以通过修改`config.go`中的`ipListAPIs`添加自定义数据源。

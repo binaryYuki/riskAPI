@@ -25,10 +25,14 @@ A high-performance Go-based service providing comprehensive IP risk detection, g
 - **Result Aggregation**: Unified format output from multiple data sources
 
 ### 🛡️ Honeypot Protection System
-- **Suspicious Path Detection**: Identifies access attempts to sensitive paths
-- **Adaptive Delays**: Progressive delay penalties for suspicious requests
-- **Soft Blocking**: Temporary blocking based on frequency thresholds
-- **Decoy Routes**: Optional honeypot route deployment
+- **Weighted Rule Table**: One table of commonly scanned paths, each with a weight (credentials and repositories high, admin panels and scripts medium, unknown 404s low)
+- **Per-Source Scoring**: A weighted leaky bucket per source that counts distinct paths; IPv4 per address, IPv6 per /64
+- **Adaptive Delays**: Random base delay plus an exponential penalty that grows with the source's score
+- **Realistic Fake Content**: Matched requests get content that looks like the real thing (`.env`, Git metadata, WordPress / phpMyAdmin login pages, SQL dumps, ...)
+- **Multi-Step Deception**: Fake login pages accept submissions; logging in with a credential taken from the fake content "succeeds" and leads to a fake admin area
+- **Credential Tracking**: Every fake credential handed out is registered, so its later use in any honeypot request is recognised and traced back to the source that harvested it
+- **Flagging**: Sources that reach the flag threshold are reported as risky by the IP check API
+- **Soft Blocking**: Returns 429 once a source reaches the block threshold
 
 ### 🚀 CDN/IDC Identification
 - **Major CDNs**: Supports Cloudflare, Fastly, Tencent EdgeOne, etc.
@@ -75,7 +79,7 @@ go mod tidy
 # 4. Configure environment variables (optional)
 export ALLOWED_CORS="yourdomain.com,anotherdomain.com"
 export HONEYTRAP_ENABLED=true
-export HONEYTRAP_DECOYS=true
+export HONEYTRAP_FLAG_THRESHOLD=8
 
 # 5. Start the service
 go run ./cmd/server
@@ -108,14 +112,21 @@ docker-compose up -d
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `ALLOWED_CORS` | Allowed CORS domains, comma-separated | `catyuki.com,tzpro.xyz` |
-| `HONEYTRAP_ENABLED` | Enable honeypot protection | `false` |
-| `HONEYTRAP_DECOYS` | Enable decoy routes | `false` |
-| `HONEYTRAP_BASE_DELAY_MIN_MS` | Minimum honeypot delay (ms) | `100` |
-| `HONEYTRAP_BASE_DELAY_MAX_MS` | Maximum honeypot delay (ms) | `500` |
-| `HONEYTRAP_BLOCK_THRESHOLD` | Block threshold (attempts) | `5` |
-| `HONEYTRAP_BLOCK_DURATION` | Block duration (seconds) | `300` |
-| `HONEYTRAP_MAX_OFFENDERS` | Max tracked honeypot offenders | `100000` |
-| `ADMIN_TOKEN` | Bearer token for `/api/cache/flush*`; admin endpoints are disabled when unset | _(unset)_ |
+| `HONEYTRAP_ENABLED` | Enable honeypot protection | `true` |
+| `HONEYTRAP_BASE_DELAY_MIN_MS` | Minimum base delay on a rule hit (ms) | `40` |
+| `HONEYTRAP_BASE_DELAY_MAX_MS` | Maximum base delay on a rule hit (ms) | `220` |
+| `HONEYTRAP_MAX_PENALTY_MS` | Cap on the extra delay added as a source's score grows (ms) | `1200` |
+| `HONEYTRAP_FAKEOK` | Probability (0-1) of answering a rule hit with fake content; decided per source and path, so repeats get the same answer. `0` falls back to the real 403/404 | `1` |
+| `HONEYTRAP_LOG` | Log every honeypot hit (flagging is always logged) | `true` |
+| `HONEYTRAP_FLAG_THRESHOLD` | Score at which a source is flagged as risky (high-weight rule = 8, medium = 4, unknown 404 = 1) | `8` |
+| `HONEYTRAP_FLAG_DURATION_SEC` | How long a source stays flagged after its last qualifying hit (seconds) | `3600` |
+| `HONEYTRAP_BLOCK_THRESHOLD` | Score at which a source is soft-blocked | `16` |
+| `HONEYTRAP_BLOCK_WINDOW_SEC` | Time for a score equal to the block threshold to leak away (seconds) | `60` |
+| `HONEYTRAP_BLOCK_DURATION_SEC` | Soft block duration (seconds) | `180` |
+| `HONEYTRAP_MAX_OFFENDERS` | Max tracked sources; when full the least recently active one is evicted | `100000` |
+| `HONEYTRAP_SECRET` | Key used to obfuscate source addresses in honeypot logs and in the flag file, and to seal access log lines of honeypot hits. When unset a random key is used: source ids and sealed lines cannot be revealed after a restart and the flag file is not written | _(unset)_ |
+| `HONEYTRAP_FLAG_FILE` | File (JSON Lines) that stores flagged sources so they survive restarts; requires `HONEYTRAP_SECRET`. Instances sharing the secret and the file share their flags | _(unset; `compose.yaml` sets it to a volume path)_ |
+| `ADMIN_TOKEN` | Bearer token for `/api/cache/flush*` and `/api/honeytrap/*`; admin endpoints are disabled when unset | _(unset)_ |
 | `TRUSTED_PROXIES` | Comma-separated CIDRs/IPs whose forwarding headers are trusted (known CDN ranges are always trusted) | loopback + private ranges |
 | `PARSE_VV_SECRET` | HMAC secret for `/api/v1/parse`; the endpoint returns 503 when unset | _(unset)_ |
 | `PARSE_WORKER_BASE` | Upstream parse worker base URL | `https://xhs-proxy.tzpro.workers.dev` |
@@ -154,7 +165,7 @@ GET /api/v1/ip
 }
 ```
 
-`isRisky` is true only for risk-list hits. `isIdc` / `isProxy` are independent flags: `isIdc` covers data/idc cloud ranges and datacenter feeds; `isProxy` covers VPN/Tor/iCloud Private Relay and public proxy lists (public proxies only set the flag, they do not make an IP risky).
+`isRisky` is true for risk-list hits and for sources flagged by this service's own honeypot (reported with source `honeytrap`). `isIdc` / `isProxy` are independent flags: `isIdc` covers data/idc cloud ranges and datacenter feeds; `isProxy` covers VPN/Tor/iCloud Private Relay and public proxy lists (public proxies only set the flag, they do not make an IP risky).
 
 ### 2. Geolocation Query (New Feature)
 ```bash
@@ -254,6 +265,53 @@ GET /api/cache/flush
 POST /api/cache/flush/{method}/{range}
 ```
 
+### 7. Honeypot Log Lookup
+Honeypot log lines identify sources by an obfuscated id, and access log lines of requests that hit a honeypot rule are sealed. These endpoints reverse both. Same authentication as cache management; they only work for values created with the current `HONEYTRAP_SECRET`.
+```bash
+# Obfuscated source id -> address (IPv4) or network (IPv6 /64)
+GET /api/honeytrap/source/{id}
+
+# Sealed access log lines -> original fields (body: one sealed value per line)
+POST /api/honeytrap/unseal
+```
+
+#### Offline: `scripts/honeytrap-reveal.py`
+Whoever holds `HONEYTRAP_SECRET` can do the same without a running server and without the admin token. The script is a text filter: it copies its input to standard output, replacing every source id and sealed line it recognises with the original, and leaves everything else untouched. Line count, order and (for JSON logs) JSON validity are preserved, so the output can be piped into the tools you already use.
+
+**Requirements**: Python 3.8+ and the `cryptography` package (`pip install cryptography`).
+
+**Key**: read from the `HONEYTRAP_SECRET` environment variable, or from the deployment's `.env` with `--env-file`. It is never taken from the command line. It must be the secret the server was using when the data was written.
+
+```bash
+export HONEYTRAP_SECRET=...                  # or add --env-file .env to each command
+
+# Logs: honeypot event lines get real sources, sealed request lines get their fields back
+docker compose logs --no-log-prefix server | scripts/honeytrap-reveal.py > revealed.log
+
+# Only the honeypot activity
+docker compose logs --no-log-prefix server | scripts/honeytrap-reveal.py | grep -E 'honeytrap |/\.env'
+
+# The flagged-source list, from the flag file or from the export
+docker compose exec server cat /var/lib/riskapi/honeytrap-flagged.jsonl | scripts/honeytrap-reveal.py
+curl -s https://your-host/api/export | grep '^# honeytrap' | scripts/honeytrap-reveal.py
+
+# Files instead of standard input
+scripts/honeytrap-reveal.py --env-file .env app.log.1 app.log.2
+```
+
+What changes in the output:
+
+| Input | Output |
+|---|---|
+| `"source":"803c4091c04865c83877ddd1dbc1d70f"` | `"source":"73.162.10.99"` (IPv6 sources become a `/64`, e.g. `2a0e:b107:1:2::/64`) |
+| `"issued_to":"<id>"`, `# honeytrap <id> until ...`, flag file lines | same replacement |
+| `{"msg":"request","sealed":"7-wjuG..."}` | `{"msg":"request","method":"GET","path":"/.env","status":200,"latency":"156ms","client_ip":"73.162.10.99","correlation_id":"..."}` |
+| `LOG_FORMAT=text` lines with `sealed=...` | `method=GET path=/.env status=200 ...` |
+
+A summary (`revealed N source id(s) and M sealed access log line(s)`) goes to standard error. The exit status is non-zero when a sealed line could not be decrypted, which means the key is wrong or the line was altered. A wrong key cannot be detected for source ids on their own: they are simply left as they are, and the summary reports `0 source id(s)`.
+
+Limits: submitted passwords are not recoverable (only their length and a truncated hash were ever logged), and data written under a different secret needs that secret.
+
 ## Performance Features
 
 ### Caching Strategy
@@ -277,10 +335,21 @@ POST /api/cache/flush/{method}/{range}
 ## Security Features
 
 ### Honeypot Protection
-- **Path Detection**: Automatically identifies admin panel access attempts
-- **Behavioral Analysis**: Anomaly detection based on User-Agent and access patterns
-- **Progressive Penalties**: Initial warnings, escalating delays for repeat access
-- **Smart Blocking**: Short-term soft blocking to avoid blocking legitimate users
+- **Rules**: Detection is by request path only; User-Agent and request body are not inspected. Rules match whole path segments or file names (`/login` matches, `/login-help` does not) and carry a weight: high (8) for things no normal user requests such as `.env`, `.git`, SSH keys and SQL dumps; medium (4) for admin panels, CMS logins, ops consoles and `.php`/`.asp`/`.jsp` scripts; low (1) for any other 404
+- **Scoring**: Each source has a leaky bucket. A new path adds its rule's weight, a path already seen adds only 0.25, and the bucket leaks at `HONEYTRAP_BLOCK_THRESHOLD / HONEYTRAP_BLOCK_WINDOW_SEC` per second. IPv4 is scored per address, IPv6 per /64
+- **Tiered Response**:
+  - Any rule hit is delayed (the delay grows with the score) and answered with fake content generated for that path. Fake credentials are unique and stable per source
+  - At the flag threshold the source is recorded: `/api/v1/ip` and `/filter-proxies` report it as risky (source `honeytrap`) for the flag duration. Known CDN ranges are never reported this way
+  - At the block threshold the source gets 429 on rule paths and unknown paths for the block duration; real API routes stay reachable
+- **Multi-Step Deception**: The fake WordPress, phpMyAdmin, generic admin and Tomcat Manager (HTTP Basic) entry points accept credentials. Wrong credentials get the product's usual error page. Credentials that came from this service's own fake content (e.g. `DB_PASSWORD` or `ADMIN_PASSWORD` from the fake `.env`) "succeed": the client gets a fake session cookie and is shown a fake admin page
+- **Credential Tracking**: Fake credentials are derived per source and registered when served (up to 50,000, oldest dropped first). On honeypot paths the query string, `Cookie`, `Authorization` and up to 8 KiB of the request body are searched for them. A match is recorded with both the source using the credential and the source it was originally issued to, and the using source is flagged immediately regardless of score. A source using fake credentials or a fake session is scored at the repeat rate, so the interaction is not cut short by the block threshold
+- **Safety Limits**: Request content is only inspected on honeypot paths that will get a fake response, never on real API routes. It is searched, never executed or forwarded. Client input shown in fake pages is HTML-escaped and truncated, redirects only point to same-site paths, and fake sessions are meaningless outside the honeypot. Submitted passwords are never stored or logged in clear text: only their length and a truncated SHA-256
+- **Events**: Every step (`bait`, `tarpit`, `login_attempt`, `credential_reuse`, `flagged`, `soft_block`, `block`) is written as one structured log line (`honeytrap <kind>`)
+- **Obfuscated Sources**: Honeypot log lines and the flag file never contain client addresses. Each source (IPv4 address or IPv6 /64) appears as a 32-character id, produced by encrypting it with a key derived from `HONEYTRAP_SECRET`. The same source always gets the same id, so ids can be compared and joined across log lines and instances. With the secret the id can be turned back into the address: `GET /api/honeytrap/source/{id}` (admin token required).
+- **Sealed Access Log Lines**: When a request hits a honeypot rule, its access log line (`msg=request`) is written as a single encrypted string, `sealed=<...>`, instead of the usual fields, so the address and path do not appear in clear text anywhere in the log. `POST /api/honeytrap/unseal` (admin token; one sealed value per line in the body) returns the original fields. Requests that do not hit a rule are logged as before. This hides addresses from someone reading the log; it does not hide which paths are traps, because the rule table is part of this public repository and the `honeytrap ...` event lines name the path and rule
+- **Honeypot Risk List**: Flagged sources are kept in a list keyed by obfuscated id, which is what `/api/v1/ip` and `/filter-proxies` consult. `/api/export` appends the list as comment lines (`# honeytrap <id> until <time>`), so consumers that parse CIDRs are unaffected; the count is in the `X-Honeytrap-Count` header. When `HONEYTRAP_FLAG_FILE` is set, each new flag is appended to that file and unexpired flags are read back at startup; instances that share the file pick up each other's flags within one `HONEYTRAP_BLOCK_WINDOW_SEC`. Changing the secret makes existing entries unmatchable rather than wrong
+- **Self-Protection**: The source table is bounded (least recently active evicted first, flagged sources last) and at most 1024 requests are delayed at once
+- **State**: Flags survive restarts when the flag file is configured. Scores, soft blocks and the credential registry live in memory only; they are per instance and reset on restart
 
 ### Access Control
 - **CORS Policy**: Strict cross-origin access control
@@ -346,7 +415,7 @@ services:
 │   ├── ipset/           # Longest-prefix-match IP table (bart), bogon checks
 │   ├── netlists/        # CDN / IDC (cloud provider) lists
 │   ├── geo/             # Geolocation aggregation (MMDB, QQWry, Meituan, IP.SB)
-│   ├── honeytrap/       # Honeypot middleware and decoy routes
+│   ├── honeytrap/       # Honeypot: rule table, per-source scoring, fake content, flagging
 │   └── cache/           # TTL + size-bounded cache
 ├── providers/           # Geolocation databases (MMDB, qqwry.dat; updated daily by CI)
 └── data/                # Static data
@@ -368,13 +437,15 @@ services:
 4. Push branch (`git push origin feature/amazing-feature`)
 5. Create Pull Request
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and what CI runs on pull requests from forks.
+
 ## FAQ
 
 **Q: Why are geolocation query results inconsistent?**  
 A: Different data sources have varying update frequencies and data origins. We recommend considering multiple results for comprehensive judgment.
 
 **Q: Will the honeypot system affect normal users?**  
-A: The honeypot only affects requests to sensitive paths. Normal API calls are unaffected.
+A: Normal API calls are never delayed or blocked. A source is only scored when it requests a path in the rule table or a path that does not exist; a few stray 404s (e.g. `/favicon.ico`) stay far below the thresholds. Note that a flagged source is reported as risky to everyone querying it, so users behind a shared IP are affected together.
 
 **Q: How can I customize the risk IP list?**  
 A: You can add custom data sources by modifying `ipListAPIs` in `config.go`.

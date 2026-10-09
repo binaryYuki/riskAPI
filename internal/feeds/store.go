@@ -11,7 +11,7 @@ import (
 	"risky_ip_filter/internal/ipset"
 )
 
-// Entry 数据源中的一条 IP/CIDR 及其来源 ID
+// Entry 一条 IP/CIDR 及其来源 ID，作为 Replace 的输入；抓取链路内部使用 feedData
 type Entry struct {
 	Value  string
 	Source string
@@ -35,9 +35,10 @@ func emptyTables() *tables {
 	return &tables{risk: ipset.New(), proxy: ipset.New(), idc: ipset.New()}
 }
 
-// batch 同一数据源的条目及其属性
+// batch 同一数据源的数据及其属性
 type batch struct {
-	entries []Entry
+	source  string
+	data    *feedData
 	tags    Tag
 	tagOnly bool
 }
@@ -53,9 +54,9 @@ type Store struct {
 	set     atomic.Pointer[tables]
 	writeMu sync.Mutex // 串行化整表替换 / 单条删除
 
-	updateMu sync.Mutex         // 串行化 Update，保护 lastGood
-	lastGood map[string][]Entry // 每个源最近一次成功的条目（Feed.ID → entries）
-	ready    atomic.Bool        // 首轮更新完成且至少一个源可用
+	updateMu sync.Mutex           // 串行化 Update，保护 lastGood
+	lastGood map[string]*feedData // 每个源最近一次成功抓取的结果（Feed.ID → data）
+	ready    atomic.Bool          // 首轮更新完成且至少一个源可用
 }
 
 // NewStore 创建空的风险表
@@ -64,7 +65,7 @@ func NewStore(feeds []Feed, fetch FetchConfig, log *slog.Logger) *Store {
 		feeds:    feeds,
 		fetch:    fetch,
 		log:      log,
-		lastGood: make(map[string][]Entry),
+		lastGood: make(map[string]*feedData),
 	}
 	s.set.Store(emptyTables())
 	return s
@@ -105,29 +106,38 @@ func (s *Store) Stats() StatsSnapshot {
 
 // Replace 由条目构建新风险表（不带标记）并整体替换；同一前缀后出现的条目覆盖先出现的
 func (s *Store) Replace(entries []Entry) {
-	s.replace([]batch{{entries: entries}})
+	// 相邻的同来源条目并入同一批，顺序不变，覆盖规则与逐条写入一致
+	var batches []batch
+	for _, e := range entries {
+		p, ok := ipset.ParseEntry(e.Value)
+		if !ok {
+			continue
+		}
+		if n := len(batches); n == 0 || batches[n-1].source != e.Source {
+			batches = append(batches, batch{source: e.Source, data: &feedData{}})
+		}
+		batches[len(batches)-1].data.add(p, strings.Contains(e.Value, "/"))
+	}
+	s.replace(batches)
 }
 
 func (s *Store) replace(batches []batch) {
 	next := emptyTables()
 	singleIPs, cidrs := 0, 0
 	for _, b := range batches {
-		for _, e := range b.entries {
+		if !b.tagOnly {
+			cidrs += b.data.cidrs
+			singleIPs += len(b.data.prefixes) - b.data.cidrs
+		}
+		for _, p := range b.data.prefixes {
 			if !b.tagOnly {
-				if !next.risk.Insert(e.Value, e.Source) {
-					continue
-				}
-				if strings.Contains(e.Value, "/") {
-					cidrs++
-				} else {
-					singleIPs++
-				}
+				next.risk.InsertPrefix(p, b.source)
 			}
 			if b.tags&TagProxy != 0 {
-				next.proxy.Insert(e.Value, e.Source)
+				next.proxy.InsertPrefix(p, b.source)
 			}
 			if b.tags&TagIDC != 0 {
-				next.idc.Insert(e.Value, e.Source)
+				next.idc.InsertPrefix(p, b.source)
 			}
 		}
 	}
@@ -174,7 +184,8 @@ func (s *Store) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Update 并发抓取全部数据源，失败的源沿用上次成功的数据，再整体替换风险表。
+// Update 并发抓取全部数据源，未变化（304）或失败的源沿用上次成功的数据，再整体替换风险表。
+// 即使所有源都未变化也会重建，保证 Clear / Remove 之后的表能在下一轮恢复。
 // 抓取与构建期间查询继续使用旧表。
 func (s *Store) Update(ctx context.Context) {
 	s.updateMu.Lock()
@@ -184,17 +195,22 @@ func (s *Store) Update(ctx context.Context) {
 	s.stats.reset()
 
 	type result struct {
-		entries []Entry
-		err     error
+		fetched
+		err error
 	}
 	results := make([]result, len(s.feeds))
 	var wg sync.WaitGroup
 	for i, feed := range s.feeds {
+		// 只有手里有上次的数据才发条件请求，否则 304 时无数据可用
+		var cond validator
+		if last := s.lastGood[feed.ID]; last != nil {
+			cond = last.validator
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			entries, err := s.fetchFeed(ctx, feed)
-			results[i] = result{entries: entries, err: err}
+			res, err := s.fetchFeed(ctx, feed, cond)
+			results[i] = result{fetched: res, err: err}
 		}()
 	}
 	wg.Wait()
@@ -206,27 +222,30 @@ func (s *Store) Update(ctx context.Context) {
 
 	// 按配置顺序合并，保证同一前缀出现在多个源时标签确定
 	var batches []batch
-	fresh, stale, missing, total := 0, 0, 0, 0
+	fresh, unchanged, stale, missing, total := 0, 0, 0, 0, 0
 	for i, r := range results {
 		feed := s.feeds[i]
 		switch {
+		case r.err == nil && r.notModified:
+			unchanged++
 		case r.err == nil:
-			s.lastGood[feed.ID] = r.entries
+			s.lastGood[feed.ID] = r.data
 			fresh++
 		case s.lastGood[feed.ID] != nil:
-			s.log.Warn("source failed, reusing last successful data", "source", feed.ID, "err", r.err, "entries", len(s.lastGood[feed.ID]))
+			s.log.Warn("source failed, reusing last successful data", "source", feed.ID, "err", r.err, "entries", len(s.lastGood[feed.ID].prefixes))
 			stale++
 		default:
 			s.log.Warn("source failed with no previous data", "source", feed.ID, "err", r.err)
 			missing++
 			continue
 		}
-		batches = append(batches, batch{entries: s.lastGood[feed.ID], tags: feed.Tags, tagOnly: feed.TagOnly})
-		total += len(s.lastGood[feed.ID])
+		data := s.lastGood[feed.ID]
+		batches = append(batches, batch{source: feed.ID, data: data, tags: feed.Tags, tagOnly: feed.TagOnly})
+		total += len(data.prefixes)
 	}
-	s.log.Info("risk list sources", "fresh", fresh, "stale", stale, "unavailable", missing, "entries", total)
+	s.log.Info("risk list sources", "fresh", fresh, "unchanged", unchanged, "stale", stale, "unavailable", missing, "entries", total)
 
-	if fresh+stale == 0 {
+	if fresh+unchanged+stale == 0 {
 		s.log.Warn("no data obtained from any source, risk list not updated")
 		return
 	}

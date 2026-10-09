@@ -30,20 +30,28 @@ func ParseEntry(entry string) (netip.Prefix, bool) {
 		if err != nil {
 			return netip.Prefix{}, false
 		}
-		addr, bits := p.Addr(), p.Bits()
-		if addr.Is4In6() {
-			if bits < 96 {
-				return netip.Prefix{}, false
-			}
-			addr, bits = addr.Unmap(), bits-96
-		}
-		return netip.PrefixFrom(addr, bits).Masked(), true
+		return normalize(p)
 	}
 	addr, ok := ParseAddr(entry)
 	if !ok {
 		return netip.Prefix{}, false
 	}
 	return netip.PrefixFrom(addr, addr.BitLen()), true
+}
+
+// normalize 规范化前缀：去掉 zone，IPv4-mapped 转为 IPv4，主机位清零。只做位运算，不涉及字符串解析
+func normalize(p netip.Prefix) (netip.Prefix, bool) {
+	if !p.IsValid() {
+		return netip.Prefix{}, false
+	}
+	addr, bits := p.Addr().WithZone(""), p.Bits()
+	if addr.Is4In6() {
+		if bits < 96 {
+			return netip.Prefix{}, false
+		}
+		addr, bits = addr.Unmap(), bits-96
+	}
+	return netip.PrefixFrom(addr, bits).Masked(), true
 }
 
 // ParseAddr 解析查询用的 IP：去掉 zone，IPv4-mapped 转为 IPv4
@@ -58,6 +66,17 @@ func ParseAddr(ip string) (netip.Addr, bool) {
 // Insert 写入条目，同一前缀后写覆盖先写；仅用于构建阶段
 func (s *Set) Insert(entry, label string) bool {
 	p, ok := ParseEntry(entry)
+	if !ok {
+		return false
+	}
+	s.table.Insert(p, label)
+	return true
+}
+
+// InsertPrefix 写入已解析的前缀，同一前缀后写覆盖先写；仅用于构建阶段。
+// 写入前会再做一次规范化，调用方无需保证前缀来自 ParseEntry。
+func (s *Set) InsertPrefix(p netip.Prefix, label string) bool {
+	p, ok := normalize(p)
 	if !ok {
 		return false
 	}
