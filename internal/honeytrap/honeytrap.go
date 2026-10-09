@@ -133,7 +133,7 @@ type Stats struct {
 func New(cfg Config, log *slog.Logger) *Trap {
 	cfg = cfg.withDefaults()
 	if cfg.Enabled && cfg.Secret == "" {
-		log.Warn("HONEYTRAP_SECRET is not set: obfuscated sources in honeytrap logs cannot be revealed after a restart")
+		log.Warn("HONEYTRAP_SECRET is not set: obfuscated sources and sealed log lines cannot be revealed after a restart")
 		if cfg.FlagFile != "" {
 			log.Warn("HONEYTRAP_FLAG_FILE is ignored without HONEYTRAP_SECRET", "path", cfg.FlagFile)
 			cfg.FlagFile = ""
@@ -200,6 +200,21 @@ func (t *Trap) Flagged(ip string) bool {
 	}
 	key, ok := sourceKey(ip)
 	return ok && t.flags.has(t.obf.hide(key), time.Now())
+}
+
+// Hit 报告本次请求是否命中了蜜罐规则（由 Middleware 计过分）
+func Hit(c *gin.Context) bool {
+	return c.GetBool(scoredKey)
+}
+
+// Seal 把一行日志封存为不透明的字符串，供访问日志隐藏命中蜜罐的请求
+func (t *Trap) Seal(line string) string {
+	return t.obf.seal(line)
+}
+
+// Unseal 还原 Seal 的结果；不是用当前密钥封存的内容返回 false
+func (t *Trap) Unseal(sealed string) (string, bool) {
+	return t.obf.unseal(sealed)
 }
 
 // FlaggedSource 蜜罐风险列表中的一项

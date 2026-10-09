@@ -119,9 +119,9 @@ docker-compose up -d
 | `HONEYTRAP_BLOCK_WINDOW_SEC` | 等于封禁阈值的分数完全漏空所需时间(秒) | `60` |
 | `HONEYTRAP_BLOCK_DURATION_SEC` | 软封时长(秒) | `180` |
 | `HONEYTRAP_MAX_OFFENDERS` | 蜜罐最多跟踪的来源数；表满时淘汰最久未活动的来源 | `100000` |
-| `HONEYTRAP_SECRET` | 混淆蜜罐日志和标记文件中来源地址所用的密钥。未设置时使用随机密钥：日志里的来源标识重启后无法还原，也不会写标记文件 | _(未设置)_ |
+| `HONEYTRAP_SECRET` | 混淆蜜罐日志和标记文件中来源地址、以及封存命中蜜罐的访问日志行所用的密钥。未设置时使用随机密钥：来源标识和封存的日志行重启后无法还原，也不会写标记文件 | _(未设置)_ |
 | `HONEYTRAP_FLAG_FILE` | 保存被标记来源的文件（JSON Lines），使标记在重启后保留；需要同时设置 `HONEYTRAP_SECRET`。使用相同密钥并共用该文件的实例共享标记 | _(未设置；`compose.yaml` 中设为卷内路径)_ |
-| `ADMIN_TOKEN` | `/api/cache/flush*` 与 `/api/honeytrap/source/*` 的 Bearer 令牌；未设置时管理接口禁用 | _(未设置)_ |
+| `ADMIN_TOKEN` | `/api/cache/flush*` 与 `/api/honeytrap/*` 的 Bearer 令牌；未设置时管理接口禁用 | _(未设置)_ |
 | `TRUSTED_PROXIES` | 允许读取转发头的可信代理 CIDR/IP，逗号分隔（已知 CDN 网段始终可信） | 回环 + 私网网段 |
 | `PARSE_VV_SECRET` | `/api/v1/parse` 的 HMAC 签名密钥；未设置时接口返回 503 | _(未设置)_ |
 | `PARSE_WORKER_BASE` | 上游解析 Worker 地址 | `https://xhs-proxy.tzpro.workers.dev` |
@@ -256,10 +256,14 @@ GET /api/cache/flush
 POST /api/cache/flush/{method}/{range}
 ```
 
-### 7. 蜜罐来源查询
-蜜罐日志用混淆后的标识表示来源。这个接口把标识还原为地址（IPv4）或网段（IPv6 /64）。认证方式与缓存管理相同；只对当前 `HONEYTRAP_SECRET` 生成的标识有效。
+### 7. 蜜罐日志还原
+蜜罐日志用混淆后的标识表示来源，命中蜜罐规则的请求的访问日志行是封存的。这两个接口用于还原。认证方式与缓存管理相同；只对当前 `HONEYTRAP_SECRET` 生成的内容有效。
 ```bash
+# 混淆的来源标识 -> 地址（IPv4）或网段（IPv6 /64）
 GET /api/honeytrap/source/{id}
+
+# 封存的访问日志行 -> 原始字段（请求体每行一个 sealed 值）
+POST /api/honeytrap/unseal
 ```
 
 ## 性能特性
@@ -295,7 +299,8 @@ GET /api/honeytrap/source/{id}
 - **假凭据回收**: 假凭据按来源生成，返回时登记（最多 50,000 个，先淘汰最早登记的）。在蜜罐路径上会检查查询串、`Cookie`、`Authorization` 以及最多 8 KiB 的请求体。命中时同时记录使用该凭据的来源和当初拿到它的来源，并且不论分数多少立即标记使用方。正在使用假凭据或假会话的来源只按重复计分，交互不会被封禁阈值打断
 - **安全边界**: 只在将要返回假内容的蜜罐路径上查看请求内容，真实API路由从不查看；内容只做查找，不执行、不转发。回显到假页面的客户端输入会做HTML转义并截断，重定向只指向本站路径，假会话在蜜罐之外没有任何作用。提交的密码不以明文保存或写入日志，只保留长度和截断的 SHA-256
 - **事件**: 每一步（`bait`、`tarpit`、`login_attempt`、`credential_reuse`、`flagged`、`soft_block`、`block`）都输出为一行结构化日志（`honeytrap <类型>`）
-- **来源混淆**: 蜜罐日志和标记文件里不出现客户端地址。每个来源（IPv4地址或IPv6 /64）显示为一个32位的标识，由 `HONEYTRAP_SECRET` 派生的密钥加密得到。同一来源的标识始终相同，可以跨日志行、跨实例比对和关联。持有密钥时可以把标识还原为地址：`GET /api/honeytrap/source/{id}`（需要管理令牌）。注意：普通访问日志（`msg=request`）仍以明文记录 `client_ip`
+- **来源混淆**: 蜜罐日志和标记文件里不出现客户端地址。每个来源（IPv4地址或IPv6 /64）显示为一个32位的标识，由 `HONEYTRAP_SECRET` 派生的密钥加密得到。同一来源的标识始终相同，可以跨日志行、跨实例比对和关联。持有密钥时可以把标识还原为地址：`GET /api/honeytrap/source/{id}`（需要管理令牌）。
+- **访问日志封存**: 请求命中蜜罐规则时，它的访问日志行（`msg=request`）不再输出各个字段，而是整行加密成一个字符串 `sealed=<...>`，日志里任何地方都不再有这次请求的明文地址和路径。`POST /api/honeytrap/unseal`（需要管理令牌；请求体每行一个 sealed 值）返回原始字段。没有命中规则的请求照常记录。这能让读日志的人看不到地址；但它隐藏不了"哪些路径是陷阱"：规则表就在这个公开仓库里，而且 `honeytrap ...` 事件行本身写着路径和规则名
 - **蜜罐风险列表**: 被标记的来源保存在一张以混淆标识为键的列表中，`/api/v1/ip` 和 `/filter-proxies` 查询的就是它。`/api/export` 会把这张列表以注释行的形式附在末尾（`# honeytrap <标识> until <时间>`），按 CIDR 解析的使用方不受影响；数量见响应头 `X-Honeytrap-Count`。设置了 `HONEYTRAP_FLAG_FILE` 时，每个新标记追加写入该文件，启动时读回未到期的标记；共用该文件的实例会在一个 `HONEYTRAP_BLOCK_WINDOW_SEC` 内看到彼此的标记。更换密钥后，已有条目只是无法再匹配，不会错标到别的地址
 - **自我保护**: 来源表有上限（优先淘汰最久未活动的来源，被标记的来源最后淘汰），同时处于延迟中的请求最多1024个
 - **状态**: 配置了标记文件时，标记在重启后保留。分数、软封和假凭据登记表只保存在内存中，各实例独立，重启后清空

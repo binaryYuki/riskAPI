@@ -120,13 +120,15 @@ func (s *Server) routes(r *gin.Engine) {
 	r.GET("/api/export", s.exportCIDRs)
 
 	// 管理接口：需 Authorization: Bearer <ADMIN_TOKEN>
-	// （/api/honeytrap/source/:id 把蜜罐日志中混淆的来源还原为地址）
+	// （/api/honeytrap/source/:id 把蜜罐日志中混淆的来源还原为地址，
+	//   /api/honeytrap/unseal 还原访问日志中被封存的行）
 	admin := r.Group("/api/cache", adminAuth(s.cfg.AdminToken))
 	{
 		admin.GET("/flush", s.flushIndex)
 		admin.POST("/flush/:method/*range", s.flush)
 	}
 	r.GET("/api/honeytrap/source/:id", adminAuth(s.cfg.AdminToken), s.revealSource)
+	r.POST("/api/honeytrap/unseal", adminAuth(s.cfg.AdminToken), s.unsealLines)
 }
 
 // corsConfig 仅允许 https 下的白名单域名及其子域名

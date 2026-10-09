@@ -1,20 +1,25 @@
 package httpapi
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"risky_ip_filter/internal/config"
 	"risky_ip_filter/internal/honeytrap"
@@ -209,6 +214,60 @@ func TestHoneytrap_ExportIncludesObfuscatedFlaggedSources(t *testing.T) {
 	assert.Equal(t, "203.0.113.0/24 # feed-a\n# honeytrap "+id, strings.SplitN(w.Body.String(), " until ", 2)[0])
 	assert.NotContains(t, w.Body.String(), "45.33.32.156")
 	assert.Equal(t, "1", w.Header().Get("X-Total-Count"))
+}
+
+func TestHoneytrap_AccessLogIsSealedOnRuleHits(t *testing.T) {
+	var buf bytes.Buffer
+	env := newTestEnvWithLog(t, slog.New(slog.NewJSONHandler(&buf, nil)), trapConfig(func(c *honeytrap.Config) { c.Secret = "test-secret" }))
+	accessLines := func() []map[string]any {
+		var out []map[string]any
+		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			var rec map[string]any
+			if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "request" {
+				out = append(out, rec)
+			}
+		}
+		return out
+	}
+
+	// 普通请求：访问日志保持明文
+	env.do(http.MethodGet, "/api/status", withRemote("45.33.32.156:1"))
+	lines := accessLines()
+	require.Len(t, lines, 1)
+	assert.Equal(t, "45.33.32.156", lines[0]["client_ip"])
+	assert.Equal(t, "/api/status", lines[0]["path"])
+	assert.NotContains(t, lines[0], "sealed")
+
+	// 命中蜜罐规则：整行只剩一个封存的字符串，日志里不再出现这次请求的地址和路径
+	buf.Reset()
+	env.do(http.MethodGet, "/wp-login.php", withRemote("45.33.32.200:1"))
+	lines = accessLines()
+	require.Len(t, lines, 1)
+	sealed, _ := lines[0]["sealed"].(string)
+	require.NotEmpty(t, sealed)
+	assert.ElementsMatch(t, []string{"time", "level", "msg", "sealed"}, slices.Collect(maps.Keys(lines[0])))
+	assert.NotContains(t, buf.String(), "45.33.32.200")
+	assert.NotContains(t, sealed, "wp-login")
+
+	// 管理接口可以还原；内容与明文访问日志的字段一致
+	assert.Equal(t, http.StatusUnauthorized, env.do(http.MethodPost, "/api/honeytrap/unseal", withBody(sealed, "text/plain")).Code)
+	w := env.do(http.MethodPost, "/api/honeytrap/unseal", asAdmin(), withBody(sealed+"\nnot-sealed\n", "text/plain"))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Message []map[string]any `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Message, 2)
+	assert.Equal(t, "45.33.32.200", resp.Message[0]["client_ip"])
+	assert.Equal(t, "/wp-login.php", resp.Message[0]["path"])
+	assert.EqualValues(t, http.StatusOK, resp.Message[0]["status"])
+	assert.NotEmpty(t, resp.Message[0]["correlation_id"])
+	assert.Nil(t, resp.Message[1])
+
+	// 没有命中规则的 404 不封存
+	buf.Reset()
+	env.do(http.MethodGet, "/no/such/route", withRemote("45.33.32.201:1"))
+	assert.Equal(t, "45.33.32.201", accessLines()[0]["client_ip"])
 }
 
 func TestHoneytrap_RevealSourceRequiresAdmin(t *testing.T) {

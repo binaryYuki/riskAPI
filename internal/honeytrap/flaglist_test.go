@@ -54,6 +54,28 @@ func TestObfuscator_RejectsForeignTokens(t *testing.T) {
 	}
 }
 
+func TestObfuscator_SealLines(t *testing.T) {
+	o := newObfuscator("secret")
+	line := `{"client_ip":"8.8.8.8","path":"/.env"}`
+
+	sealed := o.seal(line)
+	assert.NotContains(t, sealed, "8.8.8.8")
+	assert.NotEqual(t, sealed, o.seal(line), "sealing the same line twice gives different strings")
+	plain, ok := o.unseal(sealed)
+	assert.True(t, ok)
+	assert.Equal(t, line, plain)
+
+	// 同一密钥的另一个实例可以还原；换密钥、被改动、或根本不是封存结果的内容都还原不了
+	plain, ok = newObfuscator("secret").unseal(sealed)
+	assert.True(t, ok)
+	assert.Equal(t, line, plain)
+	tampered := sealed[:len(sealed)-2] + "AA"
+	for _, s := range []string{"", "x", "not base64 !", tampered, newObfuscator("other").seal(line)} {
+		_, ok := o.unseal(s)
+		assert.False(t, ok, s)
+	}
+}
+
 func TestFlagList_MemoryOnly(t *testing.T) {
 	f := newFlagList("", 2, time.Minute, quietLog())
 	now := time.Now()

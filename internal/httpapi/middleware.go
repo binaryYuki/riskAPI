@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"crypto/subtle"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"risky_ip_filter/internal/honeytrap"
 )
 
 // correlation 为请求分配 correlation ID（优先沿用 X-Correlation-ID），并写入 X-Request-ID 响应头
@@ -44,7 +47,8 @@ func (s *Server) requestLog(c *gin.Context) *slog.Logger {
 	return s.log.With("correlation_id", correlationID(c))
 }
 
-// requestLogger 记录访问日志；/.well-known/ 直接 404 且不记录
+// requestLogger 记录访问日志；/.well-known/ 直接 404 且不记录。
+// 命中蜜罐规则的请求整行封存为一个字符串（sealed），日志里不留明文地址和路径
 func (s *Server) requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/.well-known/") {
@@ -53,6 +57,18 @@ func (s *Server) requestLogger() gin.HandlerFunc {
 		}
 		start := time.Now()
 		c.Next()
+		if honeytrap.Hit(c) {
+			line, _ := json.Marshal(accessLine{
+				Method:        c.Request.Method,
+				Path:          c.Request.URL.Path,
+				Status:        c.Writer.Status(),
+				Latency:       time.Since(start).String(),
+				ClientIP:      s.clientIP(c),
+				CorrelationID: correlationID(c),
+			})
+			s.log.Info("request", "sealed", s.trap.Seal(string(line)))
+			return
+		}
 		s.log.Info("request",
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,
@@ -62,6 +78,16 @@ func (s *Server) requestLogger() gin.HandlerFunc {
 			"correlation_id", correlationID(c),
 		)
 	}
+}
+
+// accessLine 被封存的访问日志行的内容，字段与明文访问日志一致
+type accessLine struct {
+	Method        string `json:"method"`
+	Path          string `json:"path"`
+	Status        int    `json:"status"`
+	Latency       string `json:"latency"`
+	ClientIP      string `json:"client_ip"`
+	CorrelationID string `json:"correlation_id"`
 }
 
 // sensitivePath 拦截蜜罐规则表中标记为 Forbidden 的敏感路径：GET 返回 403 页面，其余方法返回 JSON。

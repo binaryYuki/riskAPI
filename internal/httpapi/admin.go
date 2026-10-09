@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -113,4 +115,25 @@ func (s *Server) revealSource(c *gin.Context) {
 		return
 	}
 	c.IndentedJSON(http.StatusOK, Response{Status: "ok", Message: gin.H{"source": source, "flagged": s.trap.Flagged(strings.TrimSuffix(source, "/64"))}})
+}
+
+// unsealLines POST /api/honeytrap/unseal 还原访问日志中被封存的行。
+// 请求体每行一个 sealed 值；按顺序返回还原出的日志内容，无法还原的为 null
+func (s *Server) unsealLines(c *gin.Context) {
+	limited := http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	defer func() { _ = limited.Close() }()
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		handleError(c, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+	lines := []json.RawMessage{}
+	for _, sealed := range strings.Fields(string(body)) {
+		if plain, ok := s.trap.Unseal(sealed); ok {
+			lines = append(lines, json.RawMessage(plain))
+		} else {
+			lines = append(lines, json.RawMessage("null"))
+		}
+	}
+	c.IndentedJSON(http.StatusOK, Response{Status: "ok", Message: lines})
 }

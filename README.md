@@ -121,9 +121,9 @@ docker-compose up -d
 | `HONEYTRAP_BLOCK_WINDOW_SEC` | Time for a score equal to the block threshold to leak away (seconds) | `60` |
 | `HONEYTRAP_BLOCK_DURATION_SEC` | Soft block duration (seconds) | `180` |
 | `HONEYTRAP_MAX_OFFENDERS` | Max tracked sources; when full the least recently active one is evicted | `100000` |
-| `HONEYTRAP_SECRET` | Key used to obfuscate source addresses in honeypot logs and in the flag file. When unset a random key is used: logged source ids cannot be revealed after a restart and the flag file is not written | _(unset)_ |
+| `HONEYTRAP_SECRET` | Key used to obfuscate source addresses in honeypot logs and in the flag file, and to seal access log lines of honeypot hits. When unset a random key is used: source ids and sealed lines cannot be revealed after a restart and the flag file is not written | _(unset)_ |
 | `HONEYTRAP_FLAG_FILE` | File (JSON Lines) that stores flagged sources so they survive restarts; requires `HONEYTRAP_SECRET`. Instances sharing the secret and the file share their flags | _(unset; `compose.yaml` sets it to a volume path)_ |
-| `ADMIN_TOKEN` | Bearer token for `/api/cache/flush*` and `/api/honeytrap/source/*`; admin endpoints are disabled when unset | _(unset)_ |
+| `ADMIN_TOKEN` | Bearer token for `/api/cache/flush*` and `/api/honeytrap/*`; admin endpoints are disabled when unset | _(unset)_ |
 | `TRUSTED_PROXIES` | Comma-separated CIDRs/IPs whose forwarding headers are trusted (known CDN ranges are always trusted) | loopback + private ranges |
 | `PARSE_VV_SECRET` | HMAC secret for `/api/v1/parse`; the endpoint returns 503 when unset | _(unset)_ |
 | `PARSE_WORKER_BASE` | Upstream parse worker base URL | `https://xhs-proxy.tzpro.workers.dev` |
@@ -258,10 +258,14 @@ GET /api/cache/flush
 POST /api/cache/flush/{method}/{range}
 ```
 
-### 7. Honeypot Source Lookup
-Honeypot log lines identify sources by an obfuscated id. This turns an id back into the address (IPv4) or network (IPv6 /64). Same authentication as cache management; it only works for ids created with the current `HONEYTRAP_SECRET`.
+### 7. Honeypot Log Lookup
+Honeypot log lines identify sources by an obfuscated id, and access log lines of requests that hit a honeypot rule are sealed. These endpoints reverse both. Same authentication as cache management; they only work for values created with the current `HONEYTRAP_SECRET`.
 ```bash
+# Obfuscated source id -> address (IPv4) or network (IPv6 /64)
 GET /api/honeytrap/source/{id}
+
+# Sealed access log lines -> original fields (body: one sealed value per line)
+POST /api/honeytrap/unseal
 ```
 
 ## Performance Features
@@ -297,7 +301,8 @@ GET /api/honeytrap/source/{id}
 - **Credential Tracking**: Fake credentials are derived per source and registered when served (up to 50,000, oldest dropped first). On honeypot paths the query string, `Cookie`, `Authorization` and up to 8 KiB of the request body are searched for them. A match is recorded with both the source using the credential and the source it was originally issued to, and the using source is flagged immediately regardless of score. A source using fake credentials or a fake session is scored at the repeat rate, so the interaction is not cut short by the block threshold
 - **Safety Limits**: Request content is only inspected on honeypot paths that will get a fake response, never on real API routes. It is searched, never executed or forwarded. Client input shown in fake pages is HTML-escaped and truncated, redirects only point to same-site paths, and fake sessions are meaningless outside the honeypot. Submitted passwords are never stored or logged in clear text: only their length and a truncated SHA-256
 - **Events**: Every step (`bait`, `tarpit`, `login_attempt`, `credential_reuse`, `flagged`, `soft_block`, `block`) is written as one structured log line (`honeytrap <kind>`)
-- **Obfuscated Sources**: Honeypot log lines and the flag file never contain client addresses. Each source (IPv4 address or IPv6 /64) appears as a 32-character id, produced by encrypting it with a key derived from `HONEYTRAP_SECRET`. The same source always gets the same id, so ids can be compared and joined across log lines and instances. With the secret the id can be turned back into the address: `GET /api/honeytrap/source/{id}` (admin token required). Note that the ordinary access log (`msg=request`) still records `client_ip` in clear text
+- **Obfuscated Sources**: Honeypot log lines and the flag file never contain client addresses. Each source (IPv4 address or IPv6 /64) appears as a 32-character id, produced by encrypting it with a key derived from `HONEYTRAP_SECRET`. The same source always gets the same id, so ids can be compared and joined across log lines and instances. With the secret the id can be turned back into the address: `GET /api/honeytrap/source/{id}` (admin token required).
+- **Sealed Access Log Lines**: When a request hits a honeypot rule, its access log line (`msg=request`) is written as a single encrypted string, `sealed=<...>`, instead of the usual fields, so the address and path do not appear in clear text anywhere in the log. `POST /api/honeytrap/unseal` (admin token; one sealed value per line in the body) returns the original fields. Requests that do not hit a rule are logged as before. This hides addresses from someone reading the log; it does not hide which paths are traps, because the rule table is part of this public repository and the `honeytrap ...` event lines name the path and rule
 - **Honeypot Risk List**: Flagged sources are kept in a list keyed by obfuscated id, which is what `/api/v1/ip` and `/filter-proxies` consult. `/api/export` appends the list as comment lines (`# honeytrap <id> until <time>`), so consumers that parse CIDRs are unaffected; the count is in the `X-Honeytrap-Count` header. When `HONEYTRAP_FLAG_FILE` is set, each new flag is appended to that file and unexpired flags are read back at startup; instances that share the file pick up each other's flags within one `HONEYTRAP_BLOCK_WINDOW_SEC`. Changing the secret makes existing entries unmatchable rather than wrong
 - **Self-Protection**: The source table is bounded (least recently active evicted first, flagged sources last) and at most 1024 requests are delayed at once
 - **State**: Flags survive restarts when the flag file is configured. Scores, soft blocks and the credential registry live in memory only; they are per instance and reset on restart

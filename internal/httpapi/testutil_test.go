@@ -57,6 +57,12 @@ type testEnv struct {
 // newTestEnv 构建带完整中间件链的测试服务；蜜罐默认关闭，管理令牌为 testAdminToken
 func newTestEnv(t *testing.T, mutate ...func(*config.Config)) *testEnv {
 	t.Helper()
+	return newTestEnvWithLog(t, discardLog(), mutate...)
+}
+
+// newTestEnvWithLog 与 newTestEnv 相同，但日志写入给定的 logger
+func newTestEnvWithLog(t *testing.T, log *slog.Logger, mutate ...func(*config.Config)) *testEnv {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	cfg := config.Load()
 	cfg.DataDir = testDataDir
@@ -72,7 +78,6 @@ func newTestEnv(t *testing.T, mutate ...func(*config.Config)) *testEnv {
 	}
 
 	lists, qq := sharedDeps()
-	log := discardLog()
 	env := &testEnv{
 		t:     t,
 		risk:  feeds.NewStore(cfg.Feeds, feeds.FetchConfig{Timeout: 2 * time.Second, Retries: 1}, log),
