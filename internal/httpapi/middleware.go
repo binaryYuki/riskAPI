@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,9 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
-
-// sensitivePathRegex 敏感文件/目录路径，直接返回 403
-var sensitivePathRegex = regexp.MustCompile(`(?i)^/(\.env|\.git|\.svn|\.hg|\.DS_Store|config\.json|config\.yml|config\.yaml|wp-config\.php|composer\.json|composer\.lock|package\.json|yarn\.lock|docker-compose\.yml|id_rsa|id_rsa\.pub|\.bash_history|\.htaccess|\.htpasswd|\.ssh|\.aws|\.npmrc|\.dockerignore|\.gitignore|\.idea|vendor/.*|node_modules/.*|backup|db\.sqlite|db\.sql|dump\.sql|phpinfo\.php|test\.php|debug\.php|admin|admin\.php|webshell\.php|shell\.php|cmd\.php)$`)
 
 // correlation 为请求分配 correlation ID（优先沿用 X-Correlation-ID），并写入 X-Request-ID 响应头
 func correlation() gin.HandlerFunc {
@@ -68,10 +64,12 @@ func (s *Server) requestLogger() gin.HandlerFunc {
 	}
 }
 
-// sensitivePath 拦截敏感路径：GET 返回 403 页面，其余方法返回 JSON
+// sensitivePath 拦截蜜罐规则表中标记为 Forbidden 的敏感路径：GET 返回 403 页面，其余方法返回 JSON。
+// 蜜罐关闭或未返回伪造内容时，这些路径由这里兜底
 func (s *Server) sensitivePath() gin.HandlerFunc {
+	rules := s.trap.Rules()
 	return func(c *gin.Context) {
-		if !sensitivePathRegex.MatchString(c.Request.URL.Path) {
+		if rule, ok := rules.Match(c.Request.URL.Path); !ok || !rule.Forbidden {
 			return
 		}
 		if c.Request.Method == http.MethodGet {

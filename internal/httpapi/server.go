@@ -86,12 +86,11 @@ func (s *Server) Handler() *gin.Engine {
 	r.Use(s.sensitivePath())
 
 	s.routes(r)
-	s.trap.RegisterDecoys(r)
 	return r
 }
 
 func (s *Server) routes(r *gin.Engine) {
-	r.NoRoute(s.notFound)
+	r.NoRoute(s.trap.NotFound(s.clientIP), s.notFound)
 	r.GET("/", s.home)
 
 	// IP 风险检测

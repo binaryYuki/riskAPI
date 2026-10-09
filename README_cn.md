@@ -23,11 +23,12 @@
 - **结果聚合**: 多数据源结果统一格式输出
 
 ### 🛡️ 蜜罐防护系统
-- **可疑路径检测**: 按请求路径匹配常被扫描的路径列表
-- **自适应延迟**: 随机基础延迟，同一IP重复命中时追加指数增长的惩罚延迟
-- **伪造200响应**: 按概率对可疑请求返回伪造的OK页面
-- **软封机制**: 同一IP命中次数达到阈值后，对其可疑路径请求返回429
-- **诱饵路由**: 可选的蜜罐路由部署
+- **带权重的规则表**: 一张常被扫描路径的规则表，每条规则有权重（凭据、版本库为高，后台、脚本为中，未知404为低）
+- **按来源计分**: 每个来源一个带权重的漏桶，按不同路径去重；IPv4按单个地址，IPv6按/64
+- **自适应延迟**: 随机基础延迟，并随来源分数追加指数增长的惩罚延迟
+- **高仿假内容**: 命中规则的请求得到与真实内容相似的响应（`.env`、Git元数据、WordPress / phpMyAdmin登录页、SQL导出等）
+- **来源标记**: 分数达到标记阈值的来源会被IP检测接口判为风险
+- **软封机制**: 分数达到封禁阈值后返回429
 
 ### 🚀 CDN/IDC识别
 - **主流CDN**: 支持Cloudflare、Fastly、腾讯云EdgeOne等
@@ -71,7 +72,7 @@ go mod tidy
 # 4. 配置环境变量 (可选)
 export ALLOWED_CORS="yourdomain.com,anotherdomain.com"
 export HONEYTRAP_ENABLED=true
-export HONEYTRAP_DECOYS=true
+export HONEYTRAP_FLAG_THRESHOLD=8
 
 # 5. 启动服务
 go run ./cmd/server
@@ -105,16 +106,17 @@ docker-compose up -d
 |--------|------|--------|
 | `ALLOWED_CORS` | 允许的CORS域名，逗号分隔 | `catyuki.com,tzpro.xyz` |
 | `HONEYTRAP_ENABLED` | 是否启用蜜罐防护 | `true` |
-| `HONEYTRAP_DECOYS` | 是否启用诱饵路由 | `false` |
-| `HONEYTRAP_BASE_DELAY_MIN_MS` | 命中可疑路径的最小基础延迟(毫秒) | `40` |
-| `HONEYTRAP_BASE_DELAY_MAX_MS` | 命中可疑路径的最大基础延迟(毫秒) | `220` |
-| `HONEYTRAP_MAX_PENALTY_MS` | 重复命中追加延迟的上限(毫秒) | `1200` |
-| `HONEYTRAP_FAKEOK` | 对可疑请求返回伪造 200 页面的概率 | `0.2` |
-| `HONEYTRAP_LOG` | 是否记录每次蜜罐命中 | `true` |
-| `HONEYTRAP_BLOCK_THRESHOLD` | 窗口内触发软封的命中次数 | `16` |
-| `HONEYTRAP_BLOCK_WINDOW_SEC` | 封禁阈值的统计窗口(秒) | `60` |
+| `HONEYTRAP_BASE_DELAY_MIN_MS` | 命中规则的最小基础延迟(毫秒) | `40` |
+| `HONEYTRAP_BASE_DELAY_MAX_MS` | 命中规则的最大基础延迟(毫秒) | `220` |
+| `HONEYTRAP_MAX_PENALTY_MS` | 随来源分数追加的延迟上限(毫秒) | `1200` |
+| `HONEYTRAP_FAKEOK` | 命中规则时返回假内容的概率(0-1)；按来源和路径确定，重复请求结果一致。设为 `0` 则返回真实的 403/404 | `1` |
+| `HONEYTRAP_LOG` | 是否记录每次蜜罐命中（来源被标记时始终记录） | `true` |
+| `HONEYTRAP_FLAG_THRESHOLD` | 来源被标记为风险的分数（高权重规则 8 分，中权重 4 分，未知 404 为 1 分） | `8` |
+| `HONEYTRAP_FLAG_DURATION_SEC` | 最后一次达标命中后标记保留的时长(秒) | `3600` |
+| `HONEYTRAP_BLOCK_THRESHOLD` | 触发软封的分数 | `16` |
+| `HONEYTRAP_BLOCK_WINDOW_SEC` | 等于封禁阈值的分数完全漏空所需时间(秒) | `60` |
 | `HONEYTRAP_BLOCK_DURATION_SEC` | 软封时长(秒) | `180` |
-| `HONEYTRAP_MAX_OFFENDERS` | 蜜罐最多跟踪的来源数；超出后的新来源只延迟、不封禁 | `100000` |
+| `HONEYTRAP_MAX_OFFENDERS` | 蜜罐最多跟踪的来源数；表满时淘汰最久未活动的来源 | `100000` |
 | `ADMIN_TOKEN` | `/api/cache/flush*` 的 Bearer 令牌；未设置时管理接口禁用 | _(未设置)_ |
 | `TRUSTED_PROXIES` | 允许读取转发头的可信代理 CIDR/IP，逗号分隔（已知 CDN 网段始终可信） | 回环 + 私网网段 |
 | `PARSE_VV_SECRET` | `/api/v1/parse` 的 HMAC 签名密钥；未设置时接口返回 503 | _(未设置)_ |
@@ -150,7 +152,7 @@ GET /api/v1/ip
 }
 ```
 
-`isRisky` 仅在命中风险列表时为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
+`isRisky` 在命中风险列表或被本服务蜜罐标记（来源名为 `honeytrap`）时为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
 
 ### 2. 地理位置查询 (新功能)
 ```bash
@@ -273,10 +275,14 @@ POST /api/cache/flush/{method}/{range}
 ## 安全特性
 
 ### 蜜罐防护
-- **路径检测**: 仅按请求路径判定（管理后台、CMS登录、敏感文件、CGI等常被扫描的端点），不检查User-Agent和请求体
-- **按IP计数**: 在固定窗口内按客户端IP累计命中次数
-- **渐进惩罚**: 每次命中都会延迟；窗口内第二次起延迟指数增长并封顶
-- **软封禁**: 达到阈值后，该IP在封禁时长内访问可疑路径一律返回429；正常API路由不受影响
+- **规则**: 仅按请求路径判定，不检查User-Agent和请求体。规则按完整的路径段或文件名匹配（`/login` 命中，`/login-help` 不命中），并带有权重：正常用户不会请求的内容为高权重(8)，如 `.env`、`.git`、SSH密钥、SQL导出；管理后台、CMS登录、运维面板和 `.php`/`.asp`/`.jsp` 脚本为中权重(4)；其余的404为低权重(1)
+- **计分**: 每个来源一个漏桶。新路径按规则权重加分，桶内已出现过的路径只加0.25分，漏桶每秒漏掉 `HONEYTRAP_BLOCK_THRESHOLD / HONEYTRAP_BLOCK_WINDOW_SEC` 分。IPv4按单个地址计分，IPv6按/64计分
+- **分级响应**:
+  - 命中规则即延迟（延迟随分数增长），并返回针对该路径生成的假内容。假凭据按来源唯一且保持不变
+  - 达到标记阈值后记下该来源：在标记时长内，`/api/v1/ip` 和 `/filter-proxies` 将其判为风险（来源名 `honeytrap`）。已知CDN网段不会因此被判为风险
+  - 达到封禁阈值后，该来源在封禁时长内访问规则路径和不存在的路径一律返回429；真实API路由不受影响
+- **自我保护**: 来源表有上限（优先淘汰最久未活动的来源，被标记的来源最后淘汰），同时处于延迟中的请求最多1024个
+- **状态**: 分数和标记只保存在内存中，各实例独立，重启后清空
 
 ### 访问控制
 - **CORS策略**: 严格的跨域访问控制
@@ -342,7 +348,7 @@ services:
 │   ├── ipset/           # 最长前缀匹配 IP 表（bart）、bogon 判断
 │   ├── netlists/        # CDN / IDC（云厂商）网段列表
 │   ├── geo/             # 地理位置聚合（MMDB、纯真、美团、IP.SB）
-│   ├── honeytrap/       # 蜜罐中间件与诱饵路由
+│   ├── honeytrap/       # 蜜罐：规则表、按来源计分、假内容、来源标记
 │   └── cache/           # 带 TTL 与容量上限的缓存
 ├── providers/           # 地理位置数据库（MMDB、qqwry.dat，CI 每日更新）
 └── data/                # 静态数据
@@ -372,7 +378,7 @@ services:
 A: 不同数据源的更新频率和数据来源不同，建议综合多个结果判断。
 
 **Q: 蜜罐系统会影响正常用户吗？**  
-A: 蜜罐只对访问敏感路径的请求生效，正常API调用不受影响。
+A: 正常API调用不会被延迟或封禁。只有请求规则表中的路径或不存在的路径才会计分，偶尔的几个404（如 `/favicon.ico`）远低于阈值。需要注意：被标记的来源对所有查询方都显示为风险，共享出口IP的用户会被一起影响。
 
 **Q: 如何自定义风险IP列表？**  
 A: 可以通过修改`config.go`中的`ipListAPIs`添加自定义数据源。

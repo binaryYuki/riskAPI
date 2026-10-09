@@ -25,11 +25,12 @@ A high-performance Go-based service providing comprehensive IP risk detection, g
 - **Result Aggregation**: Unified format output from multiple data sources
 
 ### 🛡️ Honeypot Protection System
-- **Suspicious Path Detection**: Matches request paths against a list of commonly scanned paths
-- **Adaptive Delays**: Random base delay plus an exponential penalty for repeat hits from the same IP
-- **Fake 200 Responses**: Randomly answers suspicious requests with a fake OK page
-- **Soft Blocking**: Returns 429 on suspicious paths once an IP exceeds the hit threshold
-- **Decoy Routes**: Optional honeypot route deployment
+- **Weighted Rule Table**: One table of commonly scanned paths, each with a weight (credentials and repositories high, admin panels and scripts medium, unknown 404s low)
+- **Per-Source Scoring**: A weighted leaky bucket per source that counts distinct paths; IPv4 per address, IPv6 per /64
+- **Adaptive Delays**: Random base delay plus an exponential penalty that grows with the source's score
+- **Realistic Fake Content**: Matched requests get content that looks like the real thing (`.env`, Git metadata, WordPress / phpMyAdmin login pages, SQL dumps, ...)
+- **Flagging**: Sources that reach the flag threshold are reported as risky by the IP check API
+- **Soft Blocking**: Returns 429 once a source reaches the block threshold
 
 ### 🚀 CDN/IDC Identification
 - **Major CDNs**: Supports Cloudflare, Fastly, Tencent EdgeOne, etc.
@@ -73,7 +74,7 @@ go mod tidy
 # 4. Configure environment variables (optional)
 export ALLOWED_CORS="yourdomain.com,anotherdomain.com"
 export HONEYTRAP_ENABLED=true
-export HONEYTRAP_DECOYS=true
+export HONEYTRAP_FLAG_THRESHOLD=8
 
 # 5. Start the service
 go run ./cmd/server
@@ -107,16 +108,17 @@ docker-compose up -d
 |----------|-------------|---------|
 | `ALLOWED_CORS` | Allowed CORS domains, comma-separated | `catyuki.com,tzpro.xyz` |
 | `HONEYTRAP_ENABLED` | Enable honeypot protection | `true` |
-| `HONEYTRAP_DECOYS` | Enable decoy routes | `false` |
-| `HONEYTRAP_BASE_DELAY_MIN_MS` | Minimum base delay on a suspicious path (ms) | `40` |
-| `HONEYTRAP_BASE_DELAY_MAX_MS` | Maximum base delay on a suspicious path (ms) | `220` |
-| `HONEYTRAP_MAX_PENALTY_MS` | Cap on the extra delay added for repeat hits (ms) | `1200` |
-| `HONEYTRAP_FAKEOK` | Probability of answering a suspicious request with a fake 200 page | `0.2` |
-| `HONEYTRAP_LOG` | Log every honeypot hit | `true` |
-| `HONEYTRAP_BLOCK_THRESHOLD` | Hits within the window that trigger a soft block | `16` |
-| `HONEYTRAP_BLOCK_WINDOW_SEC` | Counting window for the block threshold (seconds) | `60` |
+| `HONEYTRAP_BASE_DELAY_MIN_MS` | Minimum base delay on a rule hit (ms) | `40` |
+| `HONEYTRAP_BASE_DELAY_MAX_MS` | Maximum base delay on a rule hit (ms) | `220` |
+| `HONEYTRAP_MAX_PENALTY_MS` | Cap on the extra delay added as a source's score grows (ms) | `1200` |
+| `HONEYTRAP_FAKEOK` | Probability (0-1) of answering a rule hit with fake content; decided per source and path, so repeats get the same answer. `0` falls back to the real 403/404 | `1` |
+| `HONEYTRAP_LOG` | Log every honeypot hit (flagging is always logged) | `true` |
+| `HONEYTRAP_FLAG_THRESHOLD` | Score at which a source is flagged as risky (high-weight rule = 8, medium = 4, unknown 404 = 1) | `8` |
+| `HONEYTRAP_FLAG_DURATION_SEC` | How long a source stays flagged after its last qualifying hit (seconds) | `3600` |
+| `HONEYTRAP_BLOCK_THRESHOLD` | Score at which a source is soft-blocked | `16` |
+| `HONEYTRAP_BLOCK_WINDOW_SEC` | Time for a score equal to the block threshold to leak away (seconds) | `60` |
 | `HONEYTRAP_BLOCK_DURATION_SEC` | Soft block duration (seconds) | `180` |
-| `HONEYTRAP_MAX_OFFENDERS` | Max tracked honeypot offenders; sources beyond it are delayed but never blocked | `100000` |
+| `HONEYTRAP_MAX_OFFENDERS` | Max tracked sources; when full the least recently active one is evicted | `100000` |
 | `ADMIN_TOKEN` | Bearer token for `/api/cache/flush*`; admin endpoints are disabled when unset | _(unset)_ |
 | `TRUSTED_PROXIES` | Comma-separated CIDRs/IPs whose forwarding headers are trusted (known CDN ranges are always trusted) | loopback + private ranges |
 | `PARSE_VV_SECRET` | HMAC secret for `/api/v1/parse`; the endpoint returns 503 when unset | _(unset)_ |
@@ -152,7 +154,7 @@ GET /api/v1/ip
 }
 ```
 
-`isRisky` is true only for risk-list hits. `isIdc` / `isProxy` are independent flags: `isIdc` covers data/idc cloud ranges and datacenter feeds; `isProxy` covers VPN/Tor/iCloud Private Relay and public proxy lists (public proxies only set the flag, they do not make an IP risky).
+`isRisky` is true for risk-list hits and for sources flagged by this service's own honeypot (reported with source `honeytrap`). `isIdc` / `isProxy` are independent flags: `isIdc` covers data/idc cloud ranges and datacenter feeds; `isProxy` covers VPN/Tor/iCloud Private Relay and public proxy lists (public proxies only set the flag, they do not make an IP risky).
 
 ### 2. Geolocation Query (New Feature)
 ```bash
@@ -275,10 +277,14 @@ POST /api/cache/flush/{method}/{range}
 ## Security Features
 
 ### Honeypot Protection
-- **Path Detection**: Detection is by request path only (admin panels, CMS logins, sensitive files, CGI and other commonly scanned endpoints); User-Agent and request body are not inspected
-- **Per-IP Counting**: Hits are counted per client IP in a fixed window
-- **Progressive Penalties**: Every hit is delayed; from the second hit in a window the delay grows exponentially up to a cap
-- **Soft Blocking**: At the threshold the IP gets 429 on suspicious paths for the block duration; normal API routes stay reachable
+- **Rules**: Detection is by request path only; User-Agent and request body are not inspected. Rules match whole path segments or file names (`/login` matches, `/login-help` does not) and carry a weight: high (8) for things no normal user requests such as `.env`, `.git`, SSH keys and SQL dumps; medium (4) for admin panels, CMS logins, ops consoles and `.php`/`.asp`/`.jsp` scripts; low (1) for any other 404
+- **Scoring**: Each source has a leaky bucket. A new path adds its rule's weight, a path already seen adds only 0.25, and the bucket leaks at `HONEYTRAP_BLOCK_THRESHOLD / HONEYTRAP_BLOCK_WINDOW_SEC` per second. IPv4 is scored per address, IPv6 per /64
+- **Tiered Response**:
+  - Any rule hit is delayed (the delay grows with the score) and answered with fake content generated for that path. Fake credentials are unique and stable per source
+  - At the flag threshold the source is recorded: `/api/v1/ip` and `/filter-proxies` report it as risky (source `honeytrap`) for the flag duration. Known CDN ranges are never reported this way
+  - At the block threshold the source gets 429 on rule paths and unknown paths for the block duration; real API routes stay reachable
+- **Self-Protection**: The source table is bounded (least recently active evicted first, flagged sources last) and at most 1024 requests are delayed at once
+- **State**: Scores and flags live in memory only; they are per instance and reset on restart
 
 ### Access Control
 - **CORS Policy**: Strict cross-origin access control
@@ -344,7 +350,7 @@ services:
 │   ├── ipset/           # Longest-prefix-match IP table (bart), bogon checks
 │   ├── netlists/        # CDN / IDC (cloud provider) lists
 │   ├── geo/             # Geolocation aggregation (MMDB, QQWry, Meituan, IP.SB)
-│   ├── honeytrap/       # Honeypot middleware and decoy routes
+│   ├── honeytrap/       # Honeypot: rule table, per-source scoring, fake content, flagging
 │   └── cache/           # TTL + size-bounded cache
 ├── providers/           # Geolocation databases (MMDB, qqwry.dat; updated daily by CI)
 └── data/                # Static data
@@ -374,7 +380,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and what CI runs on pull 
 A: Different data sources have varying update frequencies and data origins. We recommend considering multiple results for comprehensive judgment.
 
 **Q: Will the honeypot system affect normal users?**  
-A: The honeypot only affects requests to sensitive paths. Normal API calls are unaffected.
+A: Normal API calls are never delayed or blocked. A source is only scored when it requests a path in the rule table or a path that does not exist; a few stray 404s (e.g. `/favicon.ico`) stay far below the thresholds. Note that a flagged source is reported as risky to everyone querying it, so users behind a shared IP are affected together.
 
 **Q: How can I customize the risk IP list?**  
 A: You can add custom data sources by modifying `ipListAPIs` in `config.go`.

@@ -54,11 +54,13 @@ func (s *Server) metricsPrometheus(c *gin.Context) {
 	metric("riskapi_feed_fetch_failures", "gauge", "Sources that failed all retries in the last feed update.", feed.FetchFailures)
 	metric("riskapi_feed_parsed_lines", "gauge", "Lines parsed in the last feed update.", feed.TotalLines)
 
-	metric("riskapi_honeytrap_hits_total", "counter", "Requests delayed by the honeytrap.", trap.Hits)
-	metric("riskapi_honeytrap_fake_ok_total", "counter", "Fake 200 responses served by the honeytrap.", trap.FakeOK)
+	metric("riskapi_honeytrap_hits_total", "counter", "Requests that matched a honeytrap rule and were tarpitted.", trap.Hits)
+	metric("riskapi_honeytrap_fake_ok_total", "counter", "Fake responses served by the honeytrap.", trap.FakeOK)
 	metric("riskapi_honeytrap_blocks_total", "counter", "Requests rejected with 429 by the honeytrap.", trap.Blocks)
+	metric("riskapi_honeytrap_flags_total", "counter", "Times a source was flagged as risky by the honeytrap.", trap.Flags)
 	metric("riskapi_honeytrap_penalty_ms_total", "counter", "Total delay injected by the honeytrap in milliseconds.", trap.PenaltyMS)
 	metric("riskapi_honeytrap_tracked_offenders", "gauge", "Sources currently tracked by the honeytrap.", trap.Offenders)
+	metric("riskapi_honeytrap_flagged_sources", "gauge", "Sources currently flagged as risky by the honeytrap.", trap.Flagged)
 
 	c.Data(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(b.String()))
 }

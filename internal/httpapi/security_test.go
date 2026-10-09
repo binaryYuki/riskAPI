@@ -115,7 +115,7 @@ func TestIPRateLimiter_WindowReset(t *testing.T) {
 func TestSensitivePath_Returns403(t *testing.T) {
 	env := newTestEnv(t)
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		for _, path := range []string{"/.env", "/.git", "/wp-config.php"} {
+		for _, path := range []string{"/.env", "/.git", "/wp-config.php", "/admin", "/vendor/autoload.php", "/.ENV"} {
 			assert.Equal(t, http.StatusForbidden, env.do(method, path).Code, "%s %s", method, path)
 		}
 	}
@@ -133,6 +133,70 @@ func TestHoneytrapWiredWithClientIP(t *testing.T) {
 	env.do(http.MethodGet, "/wp-login.php", withRemote("8.8.8.8:1"), withHeader("CF-Connecting-IP", "1.1.1.1"))
 	w := env.do(http.MethodGet, "/wp-login.php", withRemote("8.8.8.8:1"), withHeader("CF-Connecting-IP", "2.2.2.2"))
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+}
+
+func trapConfig(mutate ...func(*honeytrap.Config)) func(*config.Config) {
+	return func(c *config.Config) {
+		c.Honeytrap = honeytrap.Config{Enabled: true, BaseDelayMinMS: 1, BaseDelayMaxMS: 1, MaxPenaltyMS: 1, FakeOKProb: 1}
+		for _, m := range mutate {
+			m(&c.Honeytrap)
+		}
+	}
+}
+
+func TestHoneytrap_ServesBaitInsteadOf403(t *testing.T) {
+	env := newTestEnv(t, trapConfig())
+	w := env.do(http.MethodGet, "/.env", withRemote("8.8.8.8:1"))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "DB_PASSWORD=")
+	assert.Empty(t, w.Header().Get("X-Request-ID"))
+
+	// 伪造概率为 0 时仍由敏感路径拦截返回 403
+	env = newTestEnv(t, trapConfig(func(c *honeytrap.Config) { c.FakeOKProb = 0 }))
+	assert.Equal(t, http.StatusForbidden, env.do(http.MethodGet, "/.env", withRemote("8.8.8.8:1")).Code)
+	assert.Equal(t, http.StatusNotFound, env.do(http.MethodGet, "/wp-login.php", withRemote("9.9.9.9:1")).Code)
+}
+
+func TestHoneytrap_FlaggedSourceIsRisky(t *testing.T) {
+	env := newTestEnv(t, trapConfig())
+	lookup := func(ip string) ResponseWithIP {
+		var resp ResponseWithIP
+		// 查询方用另一个来源，与被查询的 IP 无关
+		assert.NoError(t, json.Unmarshal(env.do(http.MethodGet, "/api/v1/ip/"+ip, withRemote("9.9.9.9:1")).Body.Bytes(), &resp))
+		return resp
+	}
+	assert.False(t, lookup("45.33.32.156").IsRisky)
+
+	env.do(http.MethodGet, "/.git/config", withRemote("45.33.32.156:1"))
+	resp := lookup("45.33.32.156")
+	assert.True(t, resp.IsRisky)
+	assert.Equal(t, "risky", resp.Status)
+	assert.Contains(t, resp.Message, honeytrap.Source)
+
+	// 请求方自查同样生效
+	var self ResponseWithIP
+	assert.NoError(t, json.Unmarshal(env.do(http.MethodGet, "/api/v1/ip", withRemote("45.33.32.156:2")).Body.Bytes(), &self))
+	assert.Equal(t, "banned", self.Status)
+	assert.Equal(t, honeytrap.Source, self.Message)
+
+	// /filter-proxies 也会过滤被标记的来源
+	w := env.do(http.MethodPost, "/filter-proxies", withBody(`[{"name":"a","server":"45.33.32.156:8080"},{"name":"b","server":"45.33.32.157:8080"}]`, "application/json"))
+	assert.Contains(t, w.Body.String(), `"filtered_count":1`)
+
+	// CDN 回源网段即使被记到也不判为风险
+	env.do(http.MethodGet, "/.git/config", withRemote("104.16.0.1:1"))
+	assert.Equal(t, "cdn", lookup("104.16.0.1").Status)
+}
+
+func TestHoneytrap_NotFoundProbingIsScored(t *testing.T) {
+	env := newTestEnv(t, trapConfig(func(c *honeytrap.Config) { c.BlockThreshold = 3 }))
+	for _, path := range []string{"/a", "/b"} {
+		assert.Equal(t, http.StatusNotFound, env.do(http.MethodGet, path, withRemote("8.8.8.8:1")).Code)
+	}
+	assert.Equal(t, http.StatusTooManyRequests, env.do(http.MethodGet, "/c", withRemote("8.8.8.8:1")).Code)
+	// 真实路由与其他来源不受影响
+	assert.Equal(t, http.StatusOK, env.do(http.MethodGet, "/api/status", withRemote("8.8.8.8:1")).Code)
+	assert.Equal(t, http.StatusNotFound, env.do(http.MethodGet, "/c", withRemote("9.9.9.9:1")).Code)
 }
 
 func TestParse_MissingAndInvalidURL(t *testing.T) {
