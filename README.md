@@ -268,6 +268,43 @@ GET /api/honeytrap/source/{id}
 POST /api/honeytrap/unseal
 ```
 
+#### Offline: `scripts/honeytrap-reveal.py`
+Whoever holds `HONEYTRAP_SECRET` can do the same without a running server and without the admin token. The script is a text filter: it copies its input to standard output, replacing every source id and sealed line it recognises with the original, and leaves everything else untouched. Line count, order and (for JSON logs) JSON validity are preserved, so the output can be piped into the tools you already use.
+
+**Requirements**: Python 3.8+ and the `cryptography` package (`pip install cryptography`).
+
+**Key**: read from the `HONEYTRAP_SECRET` environment variable, or from the deployment's `.env` with `--env-file`. It is never taken from the command line. It must be the secret the server was using when the data was written.
+
+```bash
+export HONEYTRAP_SECRET=...                  # or add --env-file .env to each command
+
+# Logs: honeypot event lines get real sources, sealed request lines get their fields back
+docker compose logs --no-log-prefix server | scripts/honeytrap-reveal.py > revealed.log
+
+# Only the honeypot activity
+docker compose logs --no-log-prefix server | scripts/honeytrap-reveal.py | grep -E 'honeytrap |/\.env'
+
+# The flagged-source list, from the flag file or from the export
+docker compose exec server cat /var/lib/riskapi/honeytrap-flagged.jsonl | scripts/honeytrap-reveal.py
+curl -s https://your-host/api/export | grep '^# honeytrap' | scripts/honeytrap-reveal.py
+
+# Files instead of standard input
+scripts/honeytrap-reveal.py --env-file .env app.log.1 app.log.2
+```
+
+What changes in the output:
+
+| Input | Output |
+|---|---|
+| `"source":"803c4091c04865c83877ddd1dbc1d70f"` | `"source":"73.162.10.99"` (IPv6 sources become a `/64`, e.g. `2a0e:b107:1:2::/64`) |
+| `"issued_to":"<id>"`, `# honeytrap <id> until ...`, flag file lines | same replacement |
+| `{"msg":"request","sealed":"7-wjuG..."}` | `{"msg":"request","method":"GET","path":"/.env","status":200,"latency":"156ms","client_ip":"73.162.10.99","correlation_id":"..."}` |
+| `LOG_FORMAT=text` lines with `sealed=...` | `method=GET path=/.env status=200 ...` |
+
+A summary (`revealed N source id(s) and M sealed access log line(s)`) goes to standard error. The exit status is non-zero when a sealed line could not be decrypted, which means the key is wrong or the line was altered. A wrong key cannot be detected for source ids on their own: they are simply left as they are, and the summary reports `0 source id(s)`.
+
+Limits: submitted passwords are not recoverable (only their length and a truncated hash were ever logged), and data written under a different secret needs that secret.
+
 ## Performance Features
 
 ### Caching Strategy

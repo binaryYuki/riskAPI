@@ -266,6 +266,43 @@ GET /api/honeytrap/source/{id}
 POST /api/honeytrap/unseal
 ```
 
+#### 离线还原：`scripts/honeytrap-reveal.py`
+持有 `HONEYTRAP_SECRET` 的人不需要服务在运行、也不需要管理令牌，就能完成同样的事。这个脚本是一个文本过滤器：把输入原样写到标准输出，其中认得出的来源标识和封存的行替换成原文，其余内容不动。行数、顺序以及 JSON 日志的合法性都保持不变，所以输出可以直接接到你已有的工具上。
+
+**依赖**：Python 3.8+ 和 `cryptography` 包（`pip install cryptography`）。
+
+**密钥**：从环境变量 `HONEYTRAP_SECRET` 读取，或用 `--env-file` 指向部署所用的 `.env`；不接受从命令行参数传入。必须是这些数据写入时服务所用的密钥。
+
+```bash
+export HONEYTRAP_SECRET=...                  # 或在每条命令后加 --env-file .env
+
+# 日志：蜜罐事件行换回真实来源，封存的访问日志行换回各字段
+docker compose logs --no-log-prefix server | scripts/honeytrap-reveal.py > revealed.log
+
+# 只看蜜罐相关的活动
+docker compose logs --no-log-prefix server | scripts/honeytrap-reveal.py | grep -E 'honeytrap |/\.env'
+
+# 被标记的来源列表：来自标记文件，或来自导出
+docker compose exec server cat /var/lib/riskapi/honeytrap-flagged.jsonl | scripts/honeytrap-reveal.py
+curl -s https://your-host/api/export | grep '^# honeytrap' | scripts/honeytrap-reveal.py
+
+# 直接处理文件
+scripts/honeytrap-reveal.py --env-file .env app.log.1 app.log.2
+```
+
+输出中发生变化的内容：
+
+| 输入 | 输出 |
+|---|---|
+| `"source":"803c4091c04865c83877ddd1dbc1d70f"` | `"source":"73.162.10.99"`（IPv6 来源还原为 `/64`，如 `2a0e:b107:1:2::/64`） |
+| `"issued_to":"<标识>"`、`# honeytrap <标识> until ...`、标记文件中的行 | 同样替换 |
+| `{"msg":"request","sealed":"7-wjuG..."}` | `{"msg":"request","method":"GET","path":"/.env","status":200,"latency":"156ms","client_ip":"73.162.10.99","correlation_id":"..."}` |
+| `LOG_FORMAT=text` 下带 `sealed=...` 的行 | `method=GET path=/.env status=200 ...` |
+
+处理结果的汇总（`revealed N source id(s) and M sealed access log line(s)`）输出到标准错误。有封存的行无法解密时以非零状态退出，这说明密钥不对或该行被改动过。来源标识单独出现时无法判断密钥是否正确：它们会保持原样，汇总里显示 `0 source id(s)`。
+
+限制：提交的密码无法还原（日志里从来只有长度和截断的哈希）；用另一个密钥写入的数据需要用那个密钥。
+
 ## 性能特性
 
 ### 缓存策略
