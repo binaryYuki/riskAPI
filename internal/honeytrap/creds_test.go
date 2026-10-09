@@ -1,6 +1,8 @@
 package honeytrap
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +18,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// fakeValue 返回测试用的凭据样值（最长 64 个十六进制字符）。
+// 值在运行时由标签算出，源码里因此不出现任何形似密码或密钥的字面量
+func fakeValue(label string, n int) string {
+	sum := sha256.Sum256([]byte(label))
+	return hex.EncodeToString(sum[:])[:n]
+}
+
+// xmlrpcLogin 构造一次 wp.getUsersBlogs 调用
+func xmlrpcLogin(user, pass string) string {
+	return `<?xml version="1.0"?><methodCall><methodName>wp.getUsersBlogs</methodName><params>` +
+		`<param><value><string>` + user + `</string></value></param>` +
+		`<param><value><string>` + pass + `</string></value></param></params></methodCall>`
+}
 
 type reqOpt func(*http.Request)
 
@@ -81,7 +97,7 @@ func TestCredRegistry_IssueScanEvict(t *testing.T) {
 	first := strings.ReplaceAll(value(0), "-", "0")
 	r.issue(first, issuedCred{label: "db_pass", source: "src-a", at: later})
 	assert.Equal(t, 3, r.len())
-	creds, _ := r.scan("password=" + first + "&x=1")
+	creds, _ := r.scan("field=" + first + "&x=1")
 	require.Len(t, creds, 1)
 	assert.Equal(t, later, creds[0].at)
 
@@ -96,17 +112,18 @@ func TestCredRegistry_IssueScanEvict(t *testing.T) {
 
 func TestCredRegistry_ScanFindsValuesInContext(t *testing.T) {
 	r := newCredRegistry(10)
-	secret := "abcDEF123+/xyzXYZ789+/qrs"
-	session := "SessionValue0123456789abcd"
-	r.issue(secret, issuedCred{label: "aws_secret"})
+	// 中间带上 + 和 /：它们属于凭据字符集，不能把值切断
+	value := fakeValue("first", 10) + "+/" + fakeValue("second", 10) + "+/" + fakeValue("third", 3)
+	session := fakeValue("session", 26)
+	r.issue(value, issuedCred{label: "aws_secret"})
 	r.issue(session, issuedCred{label: sessionLabel})
 
 	for _, text := range []string{
-		secret,
-		`{"key":"` + secret + `"}`,
-		"a=1&secret=" + secret + "&b=2",
-		"Bearer " + secret,
-		"<value><string>" + secret + "</string></value>",
+		value,
+		`{"key":"` + value + `"}`,
+		"a=1&k=" + value + "&b=2",
+		"Bearer " + value,
+		"<value><string>" + value + "</string></value>",
 	} {
 		creds, session := r.scan(text)
 		assert.Len(t, creds, 1, text)
@@ -114,35 +131,36 @@ func TestCredRegistry_ScanFindsValuesInContext(t *testing.T) {
 	}
 
 	// 同一个值出现多次只算一次；会话单独报告，不算作凭据
-	creds, hasSession := r.scan(secret+" "+secret, "sid="+session)
+	creds, hasSession := r.scan(value+" "+value, "sid="+session)
 	assert.Len(t, creds, 1)
 	assert.True(t, hasSession)
 
 	// 只是包含登记值的更长字符串、或登记值的一部分，都不算命中
-	for _, text := range []string{secret + "A", "A" + secret, secret[:20], "", "short"} {
+	for _, text := range []string{value + "A", "A" + value, value[:20], "", "short"} {
 		creds, _ := r.scan(text)
 		assert.Empty(t, creds, text)
 	}
 }
 
 func TestLoginExtraction(t *testing.T) {
-	login := loginFromForm(url.Values{"log": {"admin"}, "pwd": {"hunter2"}})
+	submitted := fakeValue("form", 12)
+	login := loginFromForm(url.Values{"log": {"admin"}, "pwd": {submitted}})
 	require.NotNil(t, login)
 	assert.Equal(t, "admin", login.username)
-	assert.Equal(t, "hunter2", login.password)
+	assert.Equal(t, submitted, login.password)
 	assert.Len(t, login.passwordHash(), 16)
-	assert.NotContains(t, login.passwordHash(), "hunter2")
+	assert.NotContains(t, login.passwordHash(), submitted)
 
 	assert.Nil(t, loginFromForm(url.Values{"q": {"search"}}), "no password field")
 
-	login = loginFromForm(url.Values{"email": {"a\x00b\r\n" + strings.Repeat("x", 200)}, "password": {"p"}})
+	login = loginFromForm(url.Values{"email": {"a\x00b\r\n" + strings.Repeat("x", 200)}, "password": {fakeValue("short", 1)}})
 	assert.Len(t, login.username, maxUsernameLen)
 	assert.NotContains(t, login.username, "\n")
 
-	login = loginFromXMLRPC(`<?xml version="1.0"?><methodCall><methodName>wp.getUsersBlogs</methodName><params><param><value><string>admin</string></value></param><param><value><string>letmein</string></value></param></params></methodCall>`)
+	login = loginFromXMLRPC(xmlrpcLogin("admin", submitted))
 	require.NotNil(t, login)
 	assert.Equal(t, "admin", login.username)
-	assert.Equal(t, "letmein", login.password)
+	assert.Equal(t, submitted, login.password)
 	assert.Nil(t, loginFromXMLRPC("<string>a</string><string>b</string>"))
 }
 
@@ -167,7 +185,8 @@ func TestDeepInteraction_HarvestLoginSession(t *testing.T) {
 
 	// 登录页，然后是错误的密码：留在登录页并显示错误，用户名经过转义
 	assert.Contains(t, request(r, "/phpmyadmin/", src).Body.String(), "pma_username")
-	w := request(r, "/phpmyadmin/", src, withForm(url.Values{"pma_username": {`<b>root</b>`}, "pma_password": {"wrong-password"}}))
+	wrong := fakeValue("wrong", 14)
+	w := request(r, "/phpmyadmin/", src, withForm(url.Values{"pma_username": {`<b>root</b>`}, "pma_password": {wrong}}))
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "Access denied for user '&lt;b&gt;root&lt;/b&gt;'@'localhost'")
 	assert.Empty(t, w.Header().Get("Set-Cookie"))
@@ -199,10 +218,10 @@ func TestDeepInteraction_HarvestLoginSession(t *testing.T) {
 	attempts := logs.of(eventLoginAttempt)
 	require.Len(t, attempts, 2)
 	assert.Equal(t, "<b>root</b>", attempts[0]["username"])
-	assert.EqualValues(t, len("wrong-password"), attempts[0]["password_len"])
+	assert.EqualValues(t, len(wrong), attempts[0]["password_len"])
 
 	// 事件日志里不出现明文密码，也不出现真实地址
-	assert.NotContains(t, logs.String(), "wrong-password")
+	assert.NotContains(t, logs.String(), wrong)
 	assert.NotContains(t, logs.String(), dbPass)
 	assert.NotContains(t, logs.String(), "8.8.8.8")
 }
@@ -237,7 +256,7 @@ func TestDeepInteraction_OtherEntryPoints(t *testing.T) {
 	adminPass, awsID := envValue(t, env, "ADMIN_PASSWORD"), envValue(t, env, "AWS_ACCESS_KEY_ID")
 
 	// 通用登录页：失败 → 成功 → 控制台
-	w := request(r, "/login", "2.2.2.2:1", withForm(url.Values{"email": {"admin@example.com"}, "password": {"nope"}}))
+	w := request(r, "/login", "2.2.2.2:1", withForm(url.Values{"email": {"admin@example.com"}, "password": {fakeValue("wrong", 8)}}))
 	assert.Contains(t, w.Body.String(), "These credentials do not match our records.")
 	assert.Contains(t, w.Body.String(), `value="admin@example.com"`)
 	w = request(r, "/login", "2.2.2.2:1", withForm(url.Values{"email": {"admin@example.com"}, "password": {adminPass}}))
@@ -248,14 +267,14 @@ func TestDeepInteraction_OtherEntryPoints(t *testing.T) {
 	w = request(r, "/manager/html", "4.4.4.4:1")
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Contains(t, w.Header().Get("WWW-Authenticate"), "Basic realm=")
-	w = request(r, "/manager/html", "4.4.4.4:1", func(req *http.Request) { req.SetBasicAuth("tomcat", "tomcat") })
+	w = request(r, "/manager/html", "4.4.4.4:1", func(req *http.Request) { req.SetBasicAuth("tomcat", fakeValue("wrong", 8)) })
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	w = request(r, "/manager/html", "4.4.4.4:1", func(req *http.Request) { req.SetBasicAuth("admin", adminPass) })
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "Tomcat Web Application Manager")
 
 	// XML-RPC 暴力破解：记录尝试并返回认证失败
-	w = request(r, "/xmlrpc.php", "5.5.5.5:1", withBody(`<methodCall><methodName>wp.getUsersBlogs</methodName><params><param><value><string>admin</string></value></param><param><value><string>123456</string></value></param></params></methodCall>`))
+	w = request(r, "/xmlrpc.php", "5.5.5.5:1", withBody(xmlrpcLogin("admin", fakeValue("wrong", 6))))
 	assert.Contains(t, w.Body.String(), "Incorrect username or password.")
 
 	// 假凭据出现在查询串或 Authorization 里同样会被认出
@@ -296,7 +315,7 @@ func TestEngagement_DoesNotLowerScoreForUnknownSources(t *testing.T) {
 	// 没有拿到过假凭据的来源，随便提交表单或伪造 Cookie 不能降低计分
 	for i := range 4 {
 		request(r, fmt.Sprintf("/scan-%d.php", i), "9.9.9.9:1",
-			withForm(url.Values{"password": {"x"}}), withHeader("Cookie", "phpMyAdmin=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+			withForm(url.Values{"password": {fakeValue("wrong", 1)}}), withHeader("Cookie", "phpMyAdmin="+fakeValue("cookie", 32)))
 	}
 	assert.Equal(t, http.StatusTooManyRequests, request(r, "/scan-9.php", "9.9.9.9:1").Code)
 	assert.NotZero(t, trap.Stats().Blocks)
@@ -305,7 +324,7 @@ func TestEngagement_DoesNotLowerScoreForUnknownSources(t *testing.T) {
 func TestEmit_AlwaysLogsFlaggingWithHiddenSource(t *testing.T) {
 	var buf strings.Builder
 	gin.SetMode(gin.TestMode)
-	trap := New(fastCfg(func(c *Config) { c.EnableLog, c.Secret = false, "secret" }), slog.New(slog.NewTextHandler(&buf, nil)))
+	trap := New(fastCfg(func(c *Config) { c.EnableLog, c.Secret = false, fakeValue("key", 16) }), slog.New(slog.NewTextHandler(&buf, nil)))
 	r := gin.New()
 	r.Use(trap.Middleware(func(c *gin.Context) string { return c.RemoteIP() }))
 

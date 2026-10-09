@@ -8,3 +8,6 @@ tmp_mmdb/
 providers/**/*.mmdb
 providers/qqwry/qqwry.dat
 providers/**/.geoipupdate.lock
+
+# Added by ggshield
+.cache_ggshield
