@@ -9,5 +9,9 @@ providers/**/*.mmdb
 providers/qqwry/qqwry.dat
 providers/**/.geoipupdate.lock
 
+# 本地环境变量（含密钥），不入库
+.env
+stack.env
+
 # Added by ggshield
 .cache_ggshield

@@ -68,7 +68,9 @@ go mod tidy
 
 # 3. 下载地理位置数据库（不入 git）
 # 先从 GitHub Release `geo-data` 取最近一次成功版本（需 `gh auth login`），再从源头更新；
-# MaxMind / IPinfo 仅在设置了对应 token 时更新
+# MaxMind / IPinfo 仅在设置了对应 token 时更新。
+# MaxMind 支持多个 key（逗号分隔），某个 key 被拒绝或达到下载上限时自动换下一个：
+# MAXMIND_LICENSE_KEY=keyA,keyB，MAXMIND_ACCOUNT_ID=111,222（按位置对应；只给一个账号 ID 时所有 key 共用）
 ./scripts/fetch-geo-data.sh
 
 # 4. 配置环境变量 (可选)
@@ -130,6 +132,10 @@ docker-compose up -d
 | `LISTEN_ADDR` | 监听地址 | `:8080` |
 | `LOG_FORMAT` | 日志格式：`text` 或 `json` | `text` |
 | `LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
+| `OPENTELEMETRY` | 设为 `1` 时通过 OTLP/HTTP 上报日志与链路追踪；未设置时不创建任何 OpenTelemetry 组件 | _(未设置)_ |
+| `OPENTELEMETRY_LOG_LEVEL` | 经 OTLP 上报日志的最低级别 | 同 `LOG_LEVEL` |
+| `BETTERSTACK_SOURCE_TOKEN` | 设置后直接发往 Better Stack（优先于 `OTEL_EXPORTER_OTLP_*`）；未设置时按标准 `OTEL_*` 变量配置（`OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_TRACES_SAMPLER` 等） | _(未设置)_ |
+| `BETTERSTACK_INGESTING_HOST` | Better Stack 接收地址（只填主机名） | `s2788200.us-west-2a.betterstackdata.com` |
 | `QQWRY_PATH` | 纯真库 `qqwry.dat` 路径 | `providers/qqwry/qqwry.dat` |
 
 ## API文档

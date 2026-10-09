@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"risky_ip_filter/internal/honeytrap"
+	"risky_ip_filter/internal/telemetry"
 )
 
 // correlation 为请求分配 correlation ID（优先沿用 X-Correlation-ID），并写入 X-Request-ID 响应头
@@ -56,7 +57,13 @@ func (s *Server) requestLogger() gin.HandlerFunc {
 			return
 		}
 		start := time.Now()
+		s.annotateSpan(c)
 		c.Next()
+		// 带 ctx 记录，开启追踪时日志自动关联 trace_id / span_id
+		ctx := c.Request.Context()
+		if telemetrySkipPaths[c.Request.URL.Path] {
+			ctx = telemetry.SkipExport(ctx)
+		}
 		if honeytrap.Hit(c) {
 			line, _ := json.Marshal(accessLine{
 				Method:        c.Request.Method,
@@ -66,10 +73,10 @@ func (s *Server) requestLogger() gin.HandlerFunc {
 				ClientIP:      s.clientIP(c),
 				CorrelationID: correlationID(c),
 			})
-			s.log.Info("request", "sealed", s.trap.Seal(string(line)))
+			s.log.InfoContext(ctx, "request", "sealed", s.trap.Seal(string(line)))
 			return
 		}
-		s.log.Info("request",
+		s.log.InfoContext(ctx, "request",
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,
 			"status", c.Writer.Status(),

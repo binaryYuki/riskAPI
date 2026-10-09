@@ -217,12 +217,16 @@ func (s *Server) status(c *gin.Context) {
 }
 
 // ready 就绪检查：风险 IP 列表首轮加载完成前返回 503，
-// 供平台健康检查使用，避免新实例在数据为空时接流量（期间所有 IP 都会被判为 ok）
+// 供平台健康检查使用，避免新实例在数据为空时接流量（期间所有 IP 都会被判为 ok）。
+// 两种状态都带 version，部署后可据此确认新版本是否已上线
 func (s *Server) ready(c *gin.Context) {
 	if !s.risk.Ready() {
 		c.IndentedJSON(http.StatusServiceUnavailable, Response{
-			Status:  "loading",
-			Message: "risk IP lists are not loaded yet",
+			Status: "loading",
+			Message: gin.H{
+				"detail":  "risk IP lists are not loaded yet",
+				"version": s.version,
+			},
 		})
 		return
 	}
@@ -230,6 +234,7 @@ func (s *Server) ready(c *gin.Context) {
 	c.IndentedJSON(http.StatusOK, Response{
 		Status: "ok",
 		Message: gin.H{
+			"version":       s.version,
 			"risk_prefixes": s.risk.Snapshot().Len(),
 			"cdn_prefixes":  cdn,
 			"idc_prefixes":  idc,

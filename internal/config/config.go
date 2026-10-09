@@ -18,6 +18,10 @@ type Config struct {
 	LogFormat       string        // LOG_FORMAT: text | json
 	LogLevel        string        // LOG_LEVEL: debug | info | warn | error
 
+	// OPENTELEMETRY=1 时通过 OTLP/HTTP 上报日志与链路追踪；否则完全不加载
+	OpenTelemetry bool
+	OTel          OTelConfig
+
 	DataDir      string // CDN/IDC 列表、403 页面所在目录
 	ProvidersDir string // MMDB 所在目录
 	QQWryPath    string // QQWRY_PATH
@@ -42,6 +46,18 @@ type Config struct {
 	Honeytrap honeytrap.Config
 }
 
+// OTelConfig OpenTelemetry 上报配置，仅在 OpenTelemetry 开启时生效。
+// 未设置 BetterStackToken 时，导出地址、请求头、采样等全部由标准 OTEL_* 环境变量决定。
+type OTelConfig struct {
+	LogLevel string // OPENTELEMETRY_LOG_LEVEL：上报日志的最低级别，默认同 LOG_LEVEL
+
+	BetterStackToken string // BETTERSTACK_SOURCE_TOKEN：设置后直接发往 Better Stack
+	BetterStackHost  string // BETTERSTACK_INGESTING_HOST：只填主机名
+}
+
+// DefaultBetterStackIngestingHost 默认的 Better Stack 接收地址
+const DefaultBetterStackIngestingHost = "s2788200.us-west-2a.betterstackdata.com"
+
 // DefaultTrustedProxies 默认可信代理：回环 + 私网（平台内部负载均衡通常位于这些网段）
 var DefaultTrustedProxies = []string{
 	"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
@@ -50,11 +66,19 @@ var DefaultTrustedProxies = []string{
 
 // Load 读取环境变量并填充默认值
 func Load() Config {
+	logLevel := envString("LOG_LEVEL", "info")
 	return Config{
 		Addr:            envString("LISTEN_ADDR", ":8080"),
 		ShutdownTimeout: 15 * time.Second,
 		LogFormat:       envString("LOG_FORMAT", "text"),
-		LogLevel:        envString("LOG_LEVEL", "info"),
+		LogLevel:        logLevel,
+
+		OpenTelemetry: envBool("OPENTELEMETRY", false),
+		OTel: OTelConfig{
+			LogLevel:         envString("OPENTELEMETRY_LOG_LEVEL", logLevel),
+			BetterStackToken: envString("BETTERSTACK_SOURCE_TOKEN", ""),
+			BetterStackHost:  envString("BETTERSTACK_INGESTING_HOST", DefaultBetterStackIngestingHost),
+		},
 
 		DataDir:      "data",
 		ProvidersDir: "providers",

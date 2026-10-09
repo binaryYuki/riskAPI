@@ -202,6 +202,16 @@ func (t *Trap) Flagged(ip string) bool {
 	return ok && t.flags.has(t.obf.hide(key), time.Now())
 }
 
+// Covers 报告这个路径的请求是否会被蜜罐规则接管（蜜罐关闭时始终为 false）。
+// 供在 Middleware 之前运行的环节判断，例如决定是否为请求生成追踪 span
+func (t *Trap) Covers(path string) bool {
+	if !t.cfg.Enabled {
+		return false
+	}
+	_, ok := t.rules.Match(path)
+	return ok
+}
+
 // Hit 报告本次请求是否命中了蜜罐规则（由 Middleware 计过分）
 func Hit(c *gin.Context) bool {
 	return c.GetBool(scoredKey)

@@ -54,3 +54,23 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	assert.Equal(t, 10*time.Minute, cfg.Honeytrap.FlagDuration)
 	assert.Equal(t, 20000, cfg.InfoCacheMaxEntries)
 }
+
+func TestLoad_OTel(t *testing.T) {
+	for _, k := range []string{"OPENTELEMETRY", "OPENTELEMETRY_LOG_LEVEL", "BETTERSTACK_SOURCE_TOKEN", "BETTERSTACK_INGESTING_HOST"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("LOG_LEVEL", "debug")
+	cfg := Load()
+	assert.False(t, cfg.OpenTelemetry)
+	assert.Empty(t, cfg.OTel.BetterStackToken)
+	assert.Equal(t, DefaultBetterStackIngestingHost, cfg.OTel.BetterStackHost)
+	assert.Equal(t, "debug", cfg.OTel.LogLevel) // 默认跟随 LOG_LEVEL
+
+	t.Setenv("OPENTELEMETRY", "1")
+	t.Setenv("BETTERSTACK_SOURCE_TOKEN", "tok")
+	t.Setenv("OPENTELEMETRY_LOG_LEVEL", "warn")
+	cfg = Load()
+	assert.True(t, cfg.OpenTelemetry)
+	assert.Equal(t, "tok", cfg.OTel.BetterStackToken)
+	assert.Equal(t, "warn", cfg.OTel.LogLevel)
+}

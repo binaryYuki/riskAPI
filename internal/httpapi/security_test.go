@@ -20,6 +20,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"risky_ip_filter/internal/config"
 	"risky_ip_filter/internal/honeytrap"
@@ -377,4 +379,34 @@ func verifyVVForURL(secret, vv, targetURL string) bool {
 	m := hmac.New(sha256.New, []byte(secret))
 	_, _ = m.Write([]byte(plain))
 	return parts[3] == strings.TrimRight(base64.URLEncoding.EncodeToString(m.Sum(nil)), "=")
+}
+
+// 命中蜜罐规则的请求不生成追踪 span：否则路径和客户端地址会以明文上报，访问日志的封存就失去意义
+func TestHoneytrap_RuleHitsAreNotTraced(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	t.Cleanup(func() { _ = tp.Shutdown(t.Context()) })
+
+	traced := func(mutate func(*config.Config)) *testEnv {
+		env := newTestEnv(t, mutate)
+		env.server.tracerProvider = tp
+		env.h = env.server.Handler()
+		return env
+	}
+
+	env := traced(trapConfig())
+	env.do(http.MethodGet, "/wp-login.php", withRemote("45.33.32.200:1"))
+	env.do(http.MethodGet, "/.env", withRemote("45.33.32.200:1"))
+	assert.Empty(t, rec.Ended(), "honeypot rule hits must not produce spans")
+
+	// 其他请求照常追踪，包括未命中规则的 404
+	env.do(http.MethodGet, "/api/v1/ip/1.1.1.1", withRemote("45.33.32.201:1"))
+	env.do(http.MethodGet, "/no/such/route", withRemote("45.33.32.201:1"))
+	assert.Len(t, rec.Ended(), 2)
+
+	// 蜜罐关闭时这些路径只是普通的 403/404，照常追踪
+	rec.Reset()
+	env = traced(func(c *config.Config) {})
+	env.do(http.MethodGet, "/.env", withRemote("45.33.32.200:1"))
+	assert.Len(t, rec.Ended(), 1)
 }
