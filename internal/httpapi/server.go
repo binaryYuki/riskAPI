@@ -99,6 +99,7 @@ func (s *Server) routes(r *gin.Engine) {
 	r.POST("/api/v1/ip/:ip", s.checkIP)
 	r.GET("/api/v1/ip", s.checkRequestIP)
 	r.POST("/filter-proxies", s.filterProxies)
+	r.POST("/api/v1/webrtc", s.webrtcCheck)
 
 	// 地理位置
 	r.GET("/api/v1/info", s.ipInfo)

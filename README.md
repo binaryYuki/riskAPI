@@ -202,6 +202,53 @@ POST /filter-proxies
 ]
 ```
 
+### 3.1 WebRTC Leak Detection
+```bash
+POST /api/v1/webrtc
+```
+The browser gathers ICE candidates against a public STUN server and posts them here. The service compares every WebRTC address with the HTTP source IP: a public address of the same family that differs from the request IP means HTTP went through a proxy/VPN while WebRTC exposed the real egress (`leak: true`). Private `host` candidates, mDNS (`*.local`) names and cross-family addresses (dual stack) are not counted as leaks. At most 32 addresses are processed; body limit 16KB. `requestInfo` and each candidate's `info` carry the same geolocation `results` as `/api/v1/info` (shared cache); private/bogon addresses are not looked up.
+
+**Request Body** (`candidates` are raw `RTCIceCandidate.candidate` strings, `ips` are plain addresses; either or both):
+```json
+{
+  "candidates": ["candidate:842163049 1 udp 1677729535 45.10.10.10 54321 typ srflx raddr 0.0.0.0 rport 0"],
+  "ips": []
+}
+```
+
+**Response**:
+```json
+{
+  "status": "leak",
+  "requestIp": "154.3.3.3",
+  "requestStatus": "idc",
+  "requestInfo": {"ipinfo": {"country": "US", "asn": "AS0000"}, "ipsb": {"...": "..."}},
+  "leak": true,
+  "isRisky": false,
+  "candidates": [
+    {"ip": "45.10.10.10", "type": "srflx", "status": "ok", "isRisky": false, "sameAsRequest": false,
+     "info": {"ipinfo": {"country": "DE"}, "ipsb": {"...": "..."}}}
+  ]
+}
+```
+
+**Browser snippet**:
+```js
+const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+const candidates = [];
+pc.createDataChannel("");
+pc.onicecandidate = async (e) => {
+  if (e.candidate) return candidates.push(e.candidate.candidate);
+  pc.close();
+  const r = await fetch("https://your-api/api/v1/webrtc", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ candidates }),
+  });
+  console.log(await r.json());
+};
+await pc.setLocalDescription(await pc.createOffer());
+```
+
 ### 4. CDN/IDC Query (New Feature)
 ```bash
 # Query specific CDN IP ranges
