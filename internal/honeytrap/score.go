@@ -130,6 +130,19 @@ func (s *scorer) observe(key netip.Addr, pathHash uint64, weight float64, now ti
 	return out
 }
 
+// mark 不看分数直接标记一个已在跟踪中的来源，返回它此前是否未被标记
+func (s *scorer) mark(key netip.Addr, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.sources[key]
+	if st == nil {
+		return false
+	}
+	newly := !now.Before(st.flagUntil)
+	st.flagUntil = now.Add(s.cfg.flagDuration)
+	return newly
+}
+
 // evict 淘汰最久未活动的来源；尽量跳过仍被标记或封禁的记录
 func (s *scorer) evict(now time.Time) {
 	victim := s.lru.Back()

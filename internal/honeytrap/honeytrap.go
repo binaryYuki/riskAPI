@@ -1,6 +1,8 @@
 // Package honeytrap 识别扫描器常探测的路径并按来源计分：
 // 规则表（rules.go）给路径定权重，漏桶（score.go）按来源累计分数，
 // 本文件按分数分级响应——延迟（tarpit）、伪造内容（bait.go）、标记、软封禁。
+// 伪造内容中的假凭据会被登记（creds.go），之后在请求中再次出现时即可认出；
+// 全部过程以事件形式输出（events.go）。
 package honeytrap
 
 import (
@@ -11,6 +13,7 @@ import (
 	"math"
 	mrand "math/rand/v2"
 	"net/http"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -23,6 +26,9 @@ const Source = "honeytrap"
 const (
 	scoredKey   = "honeytrap_scored" // gin.Context 键：本次请求已由 Middleware 计分
 	maxDelaying = 1024               // 同时处于延迟中的请求上限，超出后不再延迟，避免拖住自身
+
+	maxEventPathLen = 512 // 事件中保留的路径与 UA 长度
+	maxEventUALen   = 256
 )
 
 // Config 规则、延迟、伪造内容与分级策略
@@ -44,6 +50,8 @@ type Config struct {
 	BlockDuration  time.Duration
 
 	MaxOffenders int // 最多跟踪的来源数，超出后淘汰最久未活动的来源
+
+	Sink Sink // 可选：接收全部蜜罐事件，用于持久化；为 nil 时事件只写日志
 }
 
 // withDefaults 为未设置的字段填充默认值
@@ -89,6 +97,7 @@ type Trap struct {
 	log    *slog.Logger
 	rules  *RuleSet
 	scores *scorer
+	creds  *credRegistry // 已签发的假凭据，用于在后续请求中认出它们
 
 	hashSeed  maphash.Seed // 路径去重与伪造决策
 	tokenSeed []byte       // 假凭据，进程内保持不变
@@ -98,6 +107,8 @@ type Trap struct {
 	fakeOK    atomic.Uint64
 	blocks    atomic.Uint64
 	flags     atomic.Uint64
+	logins    atomic.Uint64
+	reuses    atomic.Uint64
 	penaltyMS atomic.Uint64
 }
 
@@ -107,9 +118,12 @@ type Stats struct {
 	FakeOK    uint64 `json:"fake_ok_total"`
 	Blocks    uint64 `json:"blocks_total"`
 	Flags     uint64 `json:"flags_total"`
+	Logins    uint64 `json:"login_attempts_total"`
+	Reuses    uint64 `json:"credential_reuse_total"`
 	PenaltyMS uint64 `json:"penalty_ms_total"`
 	Offenders int    `json:"unique_offenders_cnt"`
 	Flagged   int    `json:"flagged_sources_cnt"`
+	Issued    int    `json:"issued_credentials_cnt"`
 }
 
 // New 创建蜜罐
@@ -130,6 +144,7 @@ func New(cfg Config, log *slog.Logger) *Trap {
 			idle:           cfg.BlockWindow,
 			maxSources:     cfg.MaxOffenders,
 		}),
+		creds:     newCredRegistry(maxIssuedCreds),
 		hashSeed:  maphash.MakeSeed(),
 		tokenSeed: tokenSeed,
 	}
@@ -143,9 +158,12 @@ func (t *Trap) Stats() Stats {
 		FakeOK:    t.fakeOK.Load(),
 		Blocks:    t.blocks.Load(),
 		Flags:     t.flags.Load(),
+		Logins:    t.logins.Load(),
+		Reuses:    t.reuses.Load(),
 		PenaltyMS: t.penaltyMS.Load(),
 		Offenders: tracked,
 		Flagged:   flagged,
+		Issued:    t.creds.len(),
 	}
 }
 
@@ -195,34 +213,62 @@ func (t *Trap) Middleware(clientIP func(*gin.Context) string) gin.HandlerFunc {
 		c.Set(scoredKey, true)
 
 		ip := clientIP(c)
-		out := t.observe(ip, path, rule.Weight)
-		if t.reject(c, ip, path, rule.Name, out) {
+		ev := t.newEvent(c, ip, rule.Name)
+		baiting := rule.Bait != BaitNone && t.shouldBait(ip, path)
+
+		// 只有要返回伪造内容时才查看请求内容：查找登录尝试，以及本服务签发过的假凭据
+		var in inspection
+		if baiting {
+			in = t.creds.inspect(c.Request)
+			ev.Session = in.session
+		}
+		// 正在使用假凭据或假会话的来源已经被标记，后续交互只按重复计分，让它继续暴露行为
+		weight := rule.Weight
+		if in.engaged() {
+			weight = min(weight, repeatWeight)
+		}
+		out := t.score(&ev, path, weight)
+		t.recordCredentials(ev, in)
+		if t.reject(c, ev, out) {
 			return
 		}
 
 		// 延迟：基础随机 + 惩罚（随已有分数指数增长并封顶）
-		sleepMS := jitter(cfg.BaseDelayMinMS, cfg.BaseDelayMaxMS) + backoffPenalty(out.prior, cfg.MaxPenaltyMS)
+		ev.SleepMS = jitter(cfg.BaseDelayMinMS, cfg.BaseDelayMaxMS) + backoffPenalty(out.prior, cfg.MaxPenaltyMS)
 		t.hits.Add(1)
-		if t.delay(c.Request.Context(), sleepMS) {
-			t.penaltyMS.Add(uint64(sleepMS))
+		if t.delay(c.Request.Context(), ev.SleepMS) {
+			t.penaltyMS.Add(uint64(ev.SleepMS))
 		} else {
-			sleepMS = 0
+			ev.SleepMS = 0
 		}
 
-		if t.shouldBait(ip, path) {
-			if resp, ok := render(rule.Bait, c.Request.Method, c.Request.Host, path, tokens{seed: t.tokenSeed, source: ip}); ok {
-				t.fakeOK.Add(1)
-				if cfg.EnableLog {
-					t.log.Info("honeytrap bait", "ip", ip, "path", path, "rule", rule.Name, "score", out.score, "status", resp.status, "sleep_ms", sleepMS)
+		if baiting {
+			tok := tokens{seed: t.tokenSeed, source: ip, issue: func(label, value string) {
+				t.creds.issue(value, IssuedCred{Label: label, Source: ip, At: ev.Time})
+				if label != sessionLabel && !slices.Contains(ev.Issued, label) {
+					ev.Issued = append(ev.Issued, label)
 				}
+			}}
+			resp, ok := render(rule.Bait, baitRequest{
+				method:  c.Request.Method,
+				host:    c.Request.Host,
+				path:    path,
+				tok:     tok,
+				login:   in.login,
+				reused:  len(in.reused) > 0,
+				session: in.session,
+			})
+			if ok {
+				t.fakeOK.Add(1)
+				ev.Kind, ev.Status = EventBait, resp.status
+				t.emit(ev)
 				serveBait(c, resp)
 				return
 			}
 		}
 
-		if cfg.EnableLog {
-			t.log.Info("honeytrap tarpit", "ip", ip, "path", path, "rule", rule.Name, "score", out.score, "sleep_ms", sleepMS)
-		}
+		ev.Kind = EventTarpit
+		t.emit(ev)
 		c.Next()
 	}
 }
@@ -234,38 +280,85 @@ func (t *Trap) NotFound(clientIP func(*gin.Context) string) gin.HandlerFunc {
 		if !t.cfg.Enabled || c.GetBool(scoredKey) {
 			return
 		}
-		ip, path := clientIP(c), c.Request.URL.Path
-		t.reject(c, ip, path, "not-found", t.observe(ip, path, WeightLow))
+		ev := t.newEvent(c, clientIP(c), "not-found")
+		t.reject(c, ev, t.score(&ev, c.Request.URL.Path, WeightLow))
 	}
 }
 
-// observe 为来源记一次命中并处理标记状态的变化；无法解析的 IP 不计分
-func (t *Trap) observe(ip, path string, weight float64) outcome {
-	key, ok := sourceKey(ip)
+// newEvent 填好一次请求的公共字段；客户端输入在这里统一清洗
+func (t *Trap) newEvent(c *gin.Context, ip, rule string) Event {
+	ev := Event{
+		Time:      time.Now(),
+		IP:        ip,
+		Method:    cleanText(c.Request.Method, 16),
+		Path:      cleanText(c.Request.URL.Path, maxEventPathLen),
+		Rule:      rule,
+		UserAgent: cleanText(c.Request.UserAgent(), maxEventUALen),
+	}
+	if key, ok := sourceKey(ip); ok {
+		ev.Source = key.String()
+	}
+	return ev
+}
+
+// score 为来源记一次命中，把结果写回事件，并处理标记状态的变化；无法解析的 IP 不计分。
+// 路径去重用未截断的原始路径，避免超长路径共用同一个哈希
+func (t *Trap) score(ev *Event, path string, weight float64) outcome {
+	key, ok := sourceKey(ev.IP)
 	if !ok {
 		return outcome{}
 	}
-	out := t.scores.observe(key, maphash.String(t.hashSeed, path), weight, time.Now())
+	out := t.scores.observe(key, maphash.String(t.hashSeed, path), weight, ev.Time)
+	ev.Score = out.score
 	if out.newlyFlagged {
-		t.flags.Add(1)
-		t.log.Info("honeytrap flagged", "ip", ip, "source", key, "path", path, "score", out.score, "duration", t.cfg.FlagDuration)
+		t.flagged(*ev)
 	}
 	return out
 }
 
+func (t *Trap) flagged(ev Event) {
+	t.flags.Add(1)
+	until := ev.Time.Add(t.cfg.FlagDuration)
+	ev.Kind, ev.Until = EventFlagged, &until
+	t.emit(ev)
+}
+
+// recordCredentials 记录登录尝试与假凭据重用。
+// 重用本服务签发的假凭据是确定的恶意信号：不论分数多少，使用它的来源立即被标记
+func (t *Trap) recordCredentials(ev Event, in inspection) {
+	if in.login != nil {
+		t.logins.Add(1)
+		e := ev
+		e.Kind = EventLoginAttempt
+		e.Username, e.PasswordHash, e.PasswordLen = in.login.username, in.login.passwordHash(), len(in.login.password)
+		t.emit(e)
+	}
+	if len(in.reused) == 0 {
+		return
+	}
+	for _, cred := range in.reused {
+		t.reuses.Add(1)
+		e := ev
+		e.Kind = EventCredentialReuse
+		e.Credential, e.IssuedTo, e.IssuedAt = cred.Label, cred.Source, &cred.At
+		t.emit(e)
+	}
+	if key, ok := sourceKey(ev.IP); ok && t.scores.mark(key, ev.Time) {
+		t.flagged(ev)
+	}
+}
+
 // reject 来源处于封禁期（或本次命中触发封禁）时返回 429 并中止请求
-func (t *Trap) reject(c *gin.Context, ip, path, rule string, out outcome) bool {
+func (t *Trap) reject(c *gin.Context, ev Event, out outcome) bool {
 	if !out.blocked && !out.newlyBlocked {
 		return false
 	}
 	t.blocks.Add(1)
-	if t.cfg.EnableLog {
-		if out.blocked {
-			t.log.Info("honeytrap block", "ip", ip, "path", path, "rule", rule, "until", out.blockUntil.Format(time.RFC3339))
-		} else {
-			t.log.Info("honeytrap soft block", "ip", ip, "path", path, "rule", rule, "score", out.score, "duration", t.cfg.BlockDuration)
-		}
+	ev.Kind, ev.Until = EventSoftBlock, &out.blockUntil
+	if out.blocked {
+		ev.Kind = EventBlock
 	}
+	t.emit(ev)
 	c.AbortWithStatus(http.StatusTooManyRequests)
 	return true
 }
@@ -313,6 +406,15 @@ func serveBait(c *gin.Context, resp baitResponse) {
 	h.Set("Server", fakeServer)
 	if resp.poweredBy != "" {
 		h.Set("X-Powered-By", resp.poweredBy)
+	}
+	if resp.location != "" {
+		h.Set("Location", resp.location)
+	}
+	if resp.cookie != "" {
+		h.Set("Set-Cookie", resp.cookie)
+	}
+	if resp.wwwAuth != "" {
+		h.Set("WWW-Authenticate", resp.wwwAuth)
 	}
 	c.Data(resp.status, resp.contentType, []byte(resp.body))
 	c.Abort()

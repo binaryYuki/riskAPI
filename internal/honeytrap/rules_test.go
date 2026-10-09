@@ -34,7 +34,8 @@ func TestRuleSet_Match(t *testing.T) {
 		"/wp-login.php":     "wordpress",
 		"/blog/wp-admin/":   "wordpress",
 		"/phpmyadmin/":      "phpmyadmin",
-		"/manager/html":     "ops-console",
+		"/manager/html":     "tomcat-manager",
+		"/jenkins/login":    "ops-console",
 		"/actuator/env":     "actuator",
 		"/cgi-bin/luci":     "server-internals",
 		"/index.php":        "script",
@@ -104,7 +105,10 @@ func TestRender(t *testing.T) {
 		{BaitSecret, http.MethodGet, "/.ssh/", 403, "403 Forbidden"},
 		{BaitGit, http.MethodGet, "/.git/HEAD", 200, "ref: refs/heads/main"},
 		{BaitGit, http.MethodGet, "/.git/config", 200, "git@git.example.com:web/app.git"},
+		{BaitGit, http.MethodGet, "/.git/packed-refs", 200, "refs/remotes/origin/main"},
+		{BaitGit, http.MethodGet, "/.git/logs/HEAD", 200, "clone: from git@git.example.com"},
 		{BaitGit, http.MethodGet, "/.git/", 403, "403 Forbidden"},
+		{BaitBasicAuth, http.MethodGet, "/manager/html", 401, "HTTP Status 401"},
 		{BaitSQL, http.MethodGet, "/dump.sql", 200, "-- MySQL dump"},
 		{BaitSQL, http.MethodGet, "/db.sqlite", 403, "403 Forbidden"},
 		{BaitManifest, http.MethodGet, "/package.json", 200, `"dependencies"`},
@@ -124,7 +128,7 @@ func TestRender(t *testing.T) {
 		{BaitForbidden, http.MethodGet, "/server-status", 403, "403 Forbidden"},
 	}
 	for _, tc := range cases {
-		resp, ok := render(tc.bait, tc.method, "example.com", tc.path, tok)
+		resp, ok := render(tc.bait, baitRequest{method: tc.method, host: "example.com", path: tc.path, tok: tok})
 		assert.True(t, ok, tc.path)
 		assert.Equal(t, tc.status, resp.status, tc.path)
 		assert.Contains(t, resp.body, tc.contains, tc.path)
@@ -132,19 +136,19 @@ func TestRender(t *testing.T) {
 		assert.NotContains(t, resp.body, "{{", "unfilled placeholder in %s", tc.path)
 	}
 
-	_, ok := render(BaitNone, http.MethodGet, "example.com", "/x", tok)
+	_, ok := render(BaitNone, baitRequest{method: http.MethodGet, host: "example.com", path: "/x", tok: tok})
 	assert.False(t, ok)
 
 	// 每条默认规则都能给出伪造内容
 	for _, rule := range DefaultRules() {
-		_, ok := render(rule.Bait, http.MethodGet, "example.com", "/x", tok)
+		_, ok := render(rule.Bait, baitRequest{method: http.MethodGet, host: "example.com", path: "/x", tok: tok})
 		assert.True(t, ok, rule.Name)
 	}
 }
 
 func TestRender_HostIsSanitized(t *testing.T) {
 	tok := tokens{seed: []byte("seed"), source: "8.8.8.8"}
-	resp, _ := render(BaitLogin, http.MethodGet, `"><script>alert(1)</script>`, "/login", tok)
+	resp, _ := render(BaitLogin, baitRequest{method: http.MethodGet, host: `"><script>alert(1)</script>`, path: "/login", tok: tok})
 	assert.NotContains(t, resp.body, "<script>alert")
 	assert.Contains(t, resp.body, "Sign in - localhost")
 	assert.Equal(t, "example.com:8443", safeHost("example.com:8443"))

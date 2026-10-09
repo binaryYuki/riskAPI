@@ -77,6 +77,9 @@ func (s *Server) metricsPrometheus(c *gin.Context) {
 	metric("riskapi_honeytrap_blocks_total", "counter", "Requests rejected with 429 by the honeytrap.", trap.Blocks)
 	metric("riskapi_honeytrap_flags_total", "counter", "Times a source was flagged as risky by the honeytrap.", trap.Flags)
 	metric("riskapi_honeytrap_penalty_ms_total", "counter", "Total delay injected by the honeytrap in milliseconds.", trap.PenaltyMS)
+	metric("riskapi_honeytrap_login_attempts_total", "counter", "Credentials submitted to fake login pages.", trap.Logins)
+	metric("riskapi_honeytrap_credential_reuse_total", "counter", "Fake credentials issued by the honeytrap that were seen again in a request.", trap.Reuses)
+	metric("riskapi_honeytrap_issued_credentials", "gauge", "Fake credentials currently registered for reuse detection.", trap.Issued)
 	metric("riskapi_honeytrap_tracked_offenders", "gauge", "Sources currently tracked by the honeytrap.", trap.Offenders)
 	metric("riskapi_honeytrap_flagged_sources", "gauge", "Sources currently flagged as risky by the honeytrap.", trap.Flagged)
 

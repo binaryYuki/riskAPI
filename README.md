@@ -29,6 +29,8 @@ A high-performance Go-based service providing comprehensive IP risk detection, g
 - **Per-Source Scoring**: A weighted leaky bucket per source that counts distinct paths; IPv4 per address, IPv6 per /64
 - **Adaptive Delays**: Random base delay plus an exponential penalty that grows with the source's score
 - **Realistic Fake Content**: Matched requests get content that looks like the real thing (`.env`, Git metadata, WordPress / phpMyAdmin login pages, SQL dumps, ...)
+- **Multi-Step Deception**: Fake login pages accept submissions; logging in with a credential taken from the fake content "succeeds" and leads to a fake admin area
+- **Credential Tracking**: Every fake credential handed out is registered, so its later use in any honeypot request is recognised and traced back to the source that harvested it
 - **Flagging**: Sources that reach the flag threshold are reported as risky by the IP check API
 - **Soft Blocking**: Returns 429 once a source reaches the block threshold
 
@@ -283,8 +285,12 @@ POST /api/cache/flush/{method}/{range}
   - Any rule hit is delayed (the delay grows with the score) and answered with fake content generated for that path. Fake credentials are unique and stable per source
   - At the flag threshold the source is recorded: `/api/v1/ip` and `/filter-proxies` report it as risky (source `honeytrap`) for the flag duration. Known CDN ranges are never reported this way
   - At the block threshold the source gets 429 on rule paths and unknown paths for the block duration; real API routes stay reachable
+- **Multi-Step Deception**: The fake WordPress, phpMyAdmin, generic admin and Tomcat Manager (HTTP Basic) entry points accept credentials. Wrong credentials get the product's usual error page. Credentials that came from this service's own fake content (e.g. `DB_PASSWORD` or `ADMIN_PASSWORD` from the fake `.env`) "succeed": the client gets a fake session cookie and is shown a fake admin page
+- **Credential Tracking**: Fake credentials are derived per source and registered when served (up to 50,000, oldest dropped first). On honeypot paths the query string, `Cookie`, `Authorization` and up to 8 KiB of the request body are searched for them. A match is recorded with both the source using the credential and the source it was originally issued to, and the using source is flagged immediately regardless of score. A source using fake credentials or a fake session is scored at the repeat rate, so the interaction is not cut short by the block threshold
+- **Safety Limits**: Request content is only inspected on honeypot paths that will get a fake response, never on real API routes. It is searched, never executed or forwarded. Client input shown in fake pages is HTML-escaped and truncated, redirects only point to same-site paths, and fake sessions are meaningless outside the honeypot. Submitted passwords are never stored or logged in clear text: only their length and a truncated SHA-256
+- **Events**: Every step (`bait`, `tarpit`, `login_attempt`, `credential_reuse`, `flagged`, `soft_block`, `block`) is emitted as a structured event with a stable JSON shape. Events are written to the log today; `honeytrap.Config.Sink` is the hook for persisting them
 - **Self-Protection**: The source table is bounded (least recently active evicted first, flagged sources last) and at most 1024 requests are delayed at once
-- **State**: Scores and flags live in memory only; they are per instance and reset on restart
+- **State**: Scores, flags and the credential registry live in memory only; they are per instance and reset on restart
 
 ### Access Control
 - **CORS Policy**: Strict cross-origin access control
