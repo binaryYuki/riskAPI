@@ -210,6 +210,51 @@ POST /filter-proxies
 ]
 ```
 
+### 3.1 WebRTC 泄露检测
+```bash
+POST /api/v1/webrtc   # 检测
+GET  /api/v1/webrtc   # 浏览器脚本
+```
+浏览器通过公共 STUN 服务器收集 ICE 候选后上报到此接口。服务将每个 WebRTC 地址与 HTTP 请求来源 IP 对比：存在与请求 IP 同地址族、但不相同的公网地址，说明 HTTP 走了代理/VPN 而 WebRTC 暴露了真实出口（`leak: true`）。私网 `host` 候选、mDNS（`*.local`）主机名及跨地址族（双栈）地址不计为泄露。单次最多处理 32 个地址，请求体上限 16KB。`requestInfo` 与每个候选的 `info` 为地理位置信息，内容同 `/api/v1/info` 的 `results`（共用缓存）；私网/bogon 地址不查询。
+
+**请求体**（`candidates` 为原始 `RTCIceCandidate.candidate` 字符串，`ips` 为纯地址，二选一或同时提供）:
+```json
+{
+  "candidates": ["candidate:842163049 1 udp 1677729535 45.10.10.10 54321 typ srflx raddr 0.0.0.0 rport 0"],
+  "ips": []
+}
+```
+
+**响应**:
+```json
+{
+  "status": "leak",
+  "requestIp": "154.3.3.3",
+  "requestStatus": "idc",
+  "requestInfo": {"ipinfo": {"country": "US", "asn": "AS0000"}, "ipsb": {"...": "..."}},
+  "leak": true,
+  "isRisky": false,
+  "candidates": [
+    {"ip": "45.10.10.10", "type": "srflx", "status": "ok", "isRisky": false, "sameAsRequest": false,
+     "info": {"ipinfo": {"country": "DE"}, "ipsb": {"...": "..."}}}
+  ]
+}
+```
+
+**浏览器脚本**（推荐）：`GET /api/v1/webrtc` 下发混淆后的检测脚本（源码 `web/webrtc/src/index.ts`），加载后挂在 `window.RiskWebRTC`。脚本负责收集候选并上报，默认请求脚本自身来源域名下的接口；调用页面的域名需在 `ALLOWED_CORS` 白名单内。
+```html
+<script src="https://your-api/api/v1/webrtc"></script>
+<script>
+  RiskWebRTC.check({ timeoutMs: 5000 }).then((r) => {
+    // r.status: "ok" | "leak" | "unsupported"（浏览器或扩展屏蔽了 WebRTC：不会泄露，也不会请求接口）
+    console.log(r.status, r);
+  });
+</script>
+```
+可选参数：`endpoint`（覆盖接口地址）、`stunServers`、`timeoutMs`（默认 5000）、`ips`、`signal`。另导出 `isSupported()` 与 `gather()`。
+
+脚本响应允许 CDN 缓存：`Cache-Control: public, max-age=600, s-maxage=3600, stale-while-revalidate=86400`、`CDN-Cache-Control: max-age=3600`，并带内容哈希 `ETag`（`If-None-Match` 命中返回 304）。URL 不带版本号，发布后 CDN 最多一小时内仍返回旧脚本，需要立即生效时请手动清除 CDN 缓存。修改源码后执行 `cd web/webrtc && npm ci && npm run build` 并提交 `internal/httpapi/assets/webrtc.js`；入库产物与源码不一致时 CI 会失败。
+
 ### 4. CDN/IDC查询 (新功能)
 ```bash
 # 查询指定CDN的IP范围

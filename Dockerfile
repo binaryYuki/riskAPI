@@ -3,7 +3,7 @@
 ################################################################################
 # Builder stage
 ################################################################################
-ARG GO_VERSION=1.26.8
+ARG GO_VERSION=1.26.9
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 WORKDIR /src
 
