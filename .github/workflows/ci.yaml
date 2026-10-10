@@ -70,6 +70,20 @@ jobs:
       - name: Run Go tests
         run: go test -race -v ./...
 
+      # WebRTC 检测脚本的混淆产物入库并 embed 进二进制；重新构建（固定 seed，产物确定）确认与源码一致
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Verify WebRTC script bundle is up to date
+        working-directory: web/webrtc
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          git diff --exit-code -- ../../internal/httpapi/assets/webrtc.js \
+            || { echo "::error::internal/httpapi/assets/webrtc.js is stale; run npm run build in web/webrtc and commit it"; exit 1; }
+
       # 漏洞扫描：代码实际调用到已知漏洞时失败，阻止带漏洞的镜像发布
       - name: Run govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...

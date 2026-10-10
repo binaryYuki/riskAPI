@@ -204,7 +204,8 @@ POST /filter-proxies
 
 ### 3.1 WebRTC Leak Detection
 ```bash
-POST /api/v1/webrtc
+POST /api/v1/webrtc   # detection
+GET  /api/v1/webrtc   # browser script
 ```
 The browser gathers ICE candidates against a public STUN server and posts them here. The service compares every WebRTC address with the HTTP source IP: a public address of the same family that differs from the request IP means HTTP went through a proxy/VPN while WebRTC exposed the real egress (`leak: true`). Private `host` candidates, mDNS (`*.local`) names and cross-family addresses (dual stack) are not counted as leaks. At most 32 addresses are processed; body limit 16KB. `requestInfo` and each candidate's `info` carry the same geolocation `results` as `/api/v1/info` (shared cache); private/bogon addresses are not looked up.
 
@@ -232,22 +233,19 @@ The browser gathers ICE candidates against a public STUN server and posts them h
 }
 ```
 
-**Browser snippet**:
-```js
-const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-const candidates = [];
-pc.createDataChannel("");
-pc.onicecandidate = async (e) => {
-  if (e.candidate) return candidates.push(e.candidate.candidate);
-  pc.close();
-  const r = await fetch("https://your-api/api/v1/webrtc", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ candidates }),
+**Browser script** (recommended): `GET /api/v1/webrtc` serves an obfuscated client script (source: `web/webrtc/src/index.ts`) that exposes `window.RiskWebRTC`. It gathers candidates, posts them, and by default calls the API on the origin it was loaded from. The page origin must be in `ALLOWED_CORS`.
+```html
+<script src="https://your-api/api/v1/webrtc"></script>
+<script>
+  RiskWebRTC.check({ timeoutMs: 5000 }).then((r) => {
+    // r.status: "ok" | "leak" | "unsupported" (WebRTC blocked by the browser/extension: no leak possible, API not called)
+    console.log(r.status, r);
   });
-  console.log(await r.json());
-};
-await pc.setLocalDescription(await pc.createOffer());
+</script>
 ```
+Options: `endpoint` (override API URL), `stunServers`, `timeoutMs` (default 5000), `ips`, `signal`. Also exported: `isSupported()` and `gather()`.
+
+The script response is CDN-cacheable: `Cache-Control: public, max-age=600, s-maxage=3600, stale-while-revalidate=86400`, `CDN-Cache-Control: max-age=3600`, plus a content-hash `ETag` (`If-None-Match` → 304). The URL is unversioned, so after a deploy CDNs serve the old script for up to an hour unless purged. Rebuild after editing the source with `cd web/webrtc && npm ci && npm run build` and commit `internal/httpapi/assets/webrtc.js`; CI fails if the committed bundle is stale.
 
 ### 4. CDN/IDC Query (New Feature)
 ```bash

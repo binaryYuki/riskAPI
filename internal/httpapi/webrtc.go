@@ -1,12 +1,33 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	_ "embed"
+	"encoding/hex"
 	"net/http"
 	"net/netip"
 	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
+)
+
+// webrtcScript 浏览器检测脚本，由 web/webrtc 构建（npm run build）并混淆
+//
+//go:embed assets/webrtc.js
+var webrtcScript []byte
+
+// webrtcScriptETag 脚本内容哈希，内容不变则 ETag 不变，CDN/浏览器可用 If-None-Match 重新验证
+var webrtcScriptETag = func() string {
+	sum := sha256.Sum256(webrtcScript)
+	return `"` + hex.EncodeToString(sum[:16]) + `"`
+}()
+
+const (
+	// webrtcScriptCacheControl URL 不带版本号：浏览器缓存 10 分钟，CDN 缓存 1 小时，
+	// 过期后 1 天内可先返回旧内容再后台按 ETag 重新验证
+	webrtcScriptCacheControl = "public, max-age=600, s-maxage=3600, stale-while-revalidate=86400"
+	webrtcScriptCDNCache     = "max-age=3600"
 )
 
 const (
@@ -98,6 +119,31 @@ func (s *Server) webrtcCheck(c *gin.Context) {
 		resp.Status = "leak"
 	}
 	c.IndentedJSON(http.StatusOK, resp)
+}
+
+// webrtcScriptHandler GET/HEAD /api/v1/webrtc 下发检测脚本，允许 CDN 缓存并支持 ETag 重新验证
+func (s *Server) webrtcScriptHandler(c *gin.Context) {
+	// 覆盖 correlation 中间件默认的 no-store
+	c.Header("Cache-Control", webrtcScriptCacheControl)
+	c.Header("CDN-Cache-Control", webrtcScriptCDNCache)
+	c.Header("ETag", webrtcScriptETag)
+	c.Header("X-Content-Type-Options", "nosniff")
+	if etagMatch(c.GetHeader("If-None-Match"), webrtcScriptETag) {
+		c.Status(http.StatusNotModified)
+		return
+	}
+	c.Data(http.StatusOK, "text/javascript; charset=utf-8", webrtcScript)
+}
+
+// etagMatch 按 If-None-Match 的弱比较规则判断是否命中（CDN 压缩时常把 ETag 改为 W/ 弱形式）
+func etagMatch(header, etag string) bool {
+	for _, tag := range strings.Split(header, ",") {
+		tag = strings.TrimSpace(tag)
+		if tag == "*" || strings.TrimPrefix(tag, "W/") == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // fillWebRTCInfo 并发查询请求 IP 与各公网候选地址的地理位置

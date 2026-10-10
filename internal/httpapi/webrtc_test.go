@@ -136,3 +136,37 @@ func TestWebRTCCheck(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 }
+
+func TestWebRTCScript(t *testing.T) {
+	env := newTestEnv(t)
+
+	w := env.do(http.MethodGet, "/api/v1/webrtc")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "text/javascript; charset=utf-8", w.Header().Get("Content-Type"))
+	assert.Equal(t, webrtcScriptCacheControl, w.Header().Get("Cache-Control"))
+	assert.Equal(t, webrtcScriptCDNCache, w.Header().Get("CDN-Cache-Control"))
+	etag := w.Header().Get("ETag")
+	assert.Regexp(t, `^"[0-9a-f]{32}"$`, etag)
+	assert.Equal(t, webrtcScript, w.Body.Bytes())
+	assert.Contains(t, w.Body.String(), "RiskWebRTC")
+
+	for _, inm := range []string{etag, "W/" + etag, `"other", ` + etag, "*"} {
+		w = env.do(http.MethodGet, "/api/v1/webrtc", withHeader("If-None-Match", inm))
+		assert.Equal(t, http.StatusNotModified, w.Code, inm)
+		assert.Empty(t, w.Body.String(), inm)
+		assert.Equal(t, etag, w.Header().Get("ETag"), inm)
+		assert.Equal(t, webrtcScriptCacheControl, w.Header().Get("Cache-Control"), inm)
+	}
+
+	w = env.do(http.MethodGet, "/api/v1/webrtc", withHeader("If-None-Match", `"stale"`))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	w = env.do(http.MethodHead, "/api/v1/webrtc")
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, etag, w.Header().Get("ETag"))
+
+	// POST 检测结果因人而异，仍不可缓存
+	w = env.do(http.MethodPost, "/api/v1/webrtc", withRemote("8.8.4.4:1"), withBody(`{}`, "application/json"))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "private, no-cache, no-store, max-age=0, must-revalidate", w.Header().Get("Cache-Control"))
+}
