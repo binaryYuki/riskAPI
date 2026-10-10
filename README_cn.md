@@ -64,7 +64,9 @@ go mod tidy
 
 # 3. 下载地理位置数据库（不入 git）
 # 先从 GitHub Release `geo-data` 取最近一次成功版本（需 `gh auth login`），再从源头更新；
-# MaxMind / IPinfo 仅在设置了对应 token 时更新
+# MaxMind / IPinfo 仅在设置了对应 token 时更新。
+# MaxMind 支持多个 key（逗号分隔），某个 key 被拒绝或达到下载上限时自动换下一个：
+# MAXMIND_LICENSE_KEY=keyA,keyB，MAXMIND_ACCOUNT_ID=111,222（按位置对应；只给一个账号 ID 时所有 key 共用）
 ./scripts/fetch-geo-data.sh
 
 # 4. 配置环境变量 (可选)
@@ -119,6 +121,10 @@ docker-compose up -d
 | `LISTEN_ADDR` | 监听地址 | `:8080` |
 | `LOG_FORMAT` | 日志格式：`text` 或 `json` | `text` |
 | `LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
+| `OPENTELEMETRY` | 设为 `1` 时通过 OTLP/HTTP 上报日志与链路追踪；未设置时不创建任何 OpenTelemetry 组件 | _(未设置)_ |
+| `OPENTELEMETRY_LOG_LEVEL` | 经 OTLP 上报日志的最低级别 | 同 `LOG_LEVEL` |
+| `BETTERSTACK_SOURCE_TOKEN` | 设置后直接发往 Better Stack（优先于 `OTEL_EXPORTER_OTLP_*`）；未设置时按标准 `OTEL_*` 变量配置（`OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_TRACES_SAMPLER` 等） | _(未设置)_ |
+| `BETTERSTACK_INGESTING_HOST` | Better Stack 接收地址（只填主机名） | `s2788200.us-west-2a.betterstackdata.com` |
 | `QQWRY_PATH` | 纯真库 `qqwry.dat` 路径 | `providers/qqwry/qqwry.dat` |
 
 ## API文档
@@ -139,9 +145,13 @@ GET /api/v1/ip
   "status": "risky",
   "message": "IP is in risky list: tor_exit_node",
   "ip": "1.2.3.4",
-  "isRisky": true
+  "isRisky": true,
+  "isIdc": false,
+  "isProxy": true
 }
 ```
+
+`isRisky` 仅在命中风险列表时为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
 
 ### 2. 地理位置查询 (新功能)
 ```bash
@@ -326,6 +336,8 @@ POST /api/cache/flush/{method}/{range}
 - X4BNet VPN/数据中心IP列表
 - Project Honeypot恶意IP
 - Dan.me.uk Tor列表
+- Spamhaus DROP（IPv4 + IPv6）、AbuseIPDB（置信度 100、30 天镜像）、Binary Defense、StopForumSpam 滥用网段
+- 公开代理列表（monosans、TheSpeedX），仅标记 `isProxy`
 - 其他开源威胁情报源
 
 ### 地理位置数据源

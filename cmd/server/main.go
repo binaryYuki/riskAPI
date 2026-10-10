@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -22,6 +21,7 @@ import (
 	"risky_ip_filter/internal/honeytrap"
 	"risky_ip_filter/internal/httpapi"
 	"risky_ip_filter/internal/netlists"
+	"risky_ip_filter/internal/telemetry"
 )
 
 // version 由构建参数注入：-ldflags "-X main.version=..."
@@ -29,15 +29,24 @@ var version = "dev"
 
 func main() {
 	cfg := config.Load()
-	log := newLogger(cfg.LogFormat, cfg.LogLevel)
+	tel := telemetry.Setup(context.Background(), cfg, version)
+	log := tel.Log
 	slog.SetDefault(log)
-	if err := run(cfg, log); err != nil {
+	err := run(cfg, tel)
+	if err != nil {
 		log.Error("server exited with error", "err", err)
+	}
+	// os.Exit 不执行 defer，须先发出排队中的日志与 span
+	if serr := tel.Shutdown(); serr != nil {
+		log.Warn("opentelemetry shutdown incomplete", "err", serr)
+	}
+	if err != nil {
 		os.Exit(1)
 	}
 }
 
-func run(cfg config.Config, log *slog.Logger) error {
+func run(cfg config.Config, tel *telemetry.Telemetry) error {
+	log := tel.Log
 	// SIGINT / SIGTERM（容器平台停止实例时发送）触发优雅停机
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -47,6 +56,8 @@ func run(cfg config.Config, log *slog.Logger) error {
 	transport.MaxIdleConns = 1000
 	transport.MaxIdleConnsPerHost = 100
 	transport.IdleConnTimeout = 90 * time.Second
+	// 须在上面的类型断言之后：包装后 DefaultTransport 不再是 *http.Transport
+	tel.InstrumentDefaultTransport()
 
 	qq, err := qqwry.Open(cfg.QQWryPath)
 	if err != nil {
@@ -79,6 +90,8 @@ func run(cfg config.Config, log *slog.Logger) error {
 		Geo:       geo.New(cfg.ProvidersDir, qq, cfg.InfoLookupTimeout, log),
 		InfoCache: cache.New(cfg.InfoCacheMaxEntries, cfg.InfoCacheTTL),
 		Trap:      trap,
+		// 为 nil 时不加载 otelgin 中间件
+		TracerProvider: tel.TracerProvider,
 	})
 
 	srv := &http.Server{
@@ -111,17 +124,4 @@ func run(cfg config.Config, log *slog.Logger) error {
 	}
 	log.Info("server stopped")
 	return nil
-}
-
-// newLogger 按 LOG_FORMAT（text|json）与 LOG_LEVEL 创建 slog.Logger
-func newLogger(format, level string) *slog.Logger {
-	var lvl slog.Level
-	if err := lvl.UnmarshalText([]byte(level)); err != nil {
-		lvl = slog.LevelInfo
-	}
-	opts := &slog.HandlerOptions{Level: lvl}
-	if strings.EqualFold(format, "json") {
-		return slog.New(slog.NewJSONHandler(os.Stdout, opts))
-	}
-	return slog.New(slog.NewTextHandler(os.Stdout, opts))
 }

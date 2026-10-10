@@ -66,7 +66,10 @@ go mod tidy
 
 # 3. Download geolocation databases (not stored in git)
 # Pulls the last known good set from the `geo-data` GitHub Release (needs `gh auth login`),
-# then refreshes from upstream; MaxMind / IPinfo refresh only when their tokens are set
+# then refreshes from upstream; MaxMind / IPinfo refresh only when their tokens are set.
+# MaxMind accepts several comma-separated keys and falls back to the next one when a key
+# is rejected or hits its download limit: MAXMIND_LICENSE_KEY=keyA,keyB with
+# MAXMIND_ACCOUNT_ID=111,222 (paired by position; a single account ID is shared by all keys)
 ./scripts/fetch-geo-data.sh
 
 # 4. Configure environment variables (optional)
@@ -121,6 +124,10 @@ docker-compose up -d
 | `LISTEN_ADDR` | Listen address | `:8080` |
 | `LOG_FORMAT` | Log format: `text` or `json` | `text` |
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
+| `OPENTELEMETRY` | Set to `1` to export logs and traces over OTLP/HTTP; when unset no OpenTelemetry component is created | _(unset)_ |
+| `OPENTELEMETRY_LOG_LEVEL` | Minimum level of logs exported over OTLP | same as `LOG_LEVEL` |
+| `BETTERSTACK_SOURCE_TOKEN` | Send directly to Better Stack (overrides `OTEL_EXPORTER_OTLP_*`); when unset the standard `OTEL_*` variables apply (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_TRACES_SAMPLER`, …) | _(unset)_ |
+| `BETTERSTACK_INGESTING_HOST` | Better Stack ingesting host (hostname only) | `s2788200.us-west-2a.betterstackdata.com` |
 | `QQWRY_PATH` | Path to `qqwry.dat` | `providers/qqwry/qqwry.dat` |
 
 ## API Documentation
@@ -141,9 +148,13 @@ GET /api/v1/ip
   "status": "risky",
   "message": "IP is in risky list: tor_exit_node",
   "ip": "1.2.3.4",
-  "isRisky": true
+  "isRisky": true,
+  "isIdc": false,
+  "isProxy": true
 }
 ```
+
+`isRisky` is true only for risk-list hits. `isIdc` / `isProxy` are independent flags: `isIdc` covers data/idc cloud ranges and datacenter feeds; `isProxy` covers VPN/Tor/iCloud Private Relay and public proxy lists (public proxies only set the flag, they do not make an IP risky).
 
 ### 2. Geolocation Query (New Feature)
 ```bash
@@ -328,6 +339,8 @@ POST /api/cache/flush/{method}/{range}
 - X4BNet VPN/datacenter IP lists
 - Project Honeypot malicious IPs
 - Dan.me.uk Tor lists
+- Spamhaus DROP (IPv4 + IPv6), AbuseIPDB (confidence 100, 30d mirror), Binary Defense, StopForumSpam toxic CIDRs
+- Public proxy lists (monosans, TheSpeedX), flag-only (`isProxy`)
 - Other open-source threat intelligence sources
 
 ### Geolocation Data Sources

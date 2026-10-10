@@ -2,10 +2,13 @@ package httpapi
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +16,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+
+	"risky_ip_filter/internal/config"
+	"risky_ip_filter/internal/feeds"
 )
 
 func TestHandleError(t *testing.T) {
@@ -34,15 +40,15 @@ func TestCheckRequestIP(t *testing.T) {
 		wantBody   string
 	}{
 		{"localhost", "127.0.0.1:12345", nil, http.StatusOK,
-			`{"status":"ok","message":"Client IP is not risky (private/bogon)","ip":"127.0.0.1","isRisky":false}`},
+			`{"status":"ok","message":"Client IP is not risky (private/bogon)","ip":"127.0.0.1","isRisky":false,"isIdc":false,"isProxy":false}`},
 		{"invalid ip", "invalid-ip:12345", nil, http.StatusBadRequest,
 			`{"message":"Invalid or unidentifiable IP address.", "status":"error"}`},
 		{"private ip", "192.168.1.1:12345", nil, http.StatusOK,
-			`{"status":"ok","message":"Client IP is not risky (private/bogon)","ip":"192.168.1.1","isRisky":false}`},
+			`{"status":"ok","message":"Client IP is not risky (private/bogon)","ip":"192.168.1.1","isRisky":false,"isIdc":false,"isProxy":false}`},
 		{"risky ip", "8.8.8.8:12345", map[string]string{"8.8.8.8": "Test reason"}, http.StatusOK,
-			`{"status":"banned","message":"Test reason","ip":"8.8.8.8","isRisky":true}`},
+			`{"status":"banned","message":"Test reason","ip":"8.8.8.8","isRisky":true,"isIdc":false,"isProxy":false}`},
 		{"safe ip", "8.8.4.4:12345", nil, http.StatusOK,
-			`{"status":"ok","message":"IP is not listed as risky.","ip":"8.8.4.4","isRisky":false}`},
+			`{"status":"ok","message":"IP is not listed as risky.","ip":"8.8.4.4","isRisky":false,"isIdc":false,"isProxy":false}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -81,18 +87,18 @@ func TestCheckIP_ExactMessages(t *testing.T) {
 	env := newTestEnv(t)
 	env.setRisky(map[string]string{"9.9.9.9": "single-test"})
 	cases := map[string]string{
-		"9.9.9.9":    `{"status":"risky","message":"IP is in risky list: single-test","ip":"9.9.9.9","isRisky":true}`,
-		"104.16.0.1": `{"status":"cdn","message":"IP belongs to CDN: cloudflare","ip":"104.16.0.1","isRisky":false}`,
-		"3.5.140.1":  `{"status":"idc","message":"IP belongs to IDC: aws","ip":"3.5.140.1","isRisky":false}`,
-		"1.0.0.0":    `{"status":"ok","message":"IP is not risky","ip":"1.0.0.0","isRisky":false}`,
+		"9.9.9.9":    `{"status":"risky","message":"IP is in risky list: single-test","ip":"9.9.9.9","isRisky":true,"isIdc":false,"isProxy":false}`,
+		"104.16.0.1": `{"status":"cdn","message":"IP belongs to CDN: cloudflare","ip":"104.16.0.1","isRisky":false,"isIdc":false,"isProxy":false}`,
+		"3.5.140.1":  `{"status":"idc","message":"IP belongs to IDC: aws","ip":"3.5.140.1","isRisky":false,"isIdc":true,"isProxy":false}`,
+		"1.0.0.0":    `{"status":"ok","message":"IP is not risky","ip":"1.0.0.0","isRisky":false,"isIdc":false,"isProxy":false}`,
 	}
 	for ip, want := range cases {
 		assert.JSONEq(t, want, env.do(http.MethodGet, "/api/v1/ip/"+ip).Body.String(), ip)
 	}
 	// 客户端版本的文案不同
-	assert.JSONEq(t, `{"status":"cdn","message":"Client IP belongs to CDN: cloudflare","ip":"104.16.0.1","isRisky":false}`,
+	assert.JSONEq(t, `{"status":"cdn","message":"Client IP belongs to CDN: cloudflare","ip":"104.16.0.1","isRisky":false,"isIdc":false,"isProxy":false}`,
 		env.do(http.MethodGet, "/api/v1/ip", withRemote("104.16.0.1:1")).Body.String())
-	assert.JSONEq(t, `{"status":"idc","message":"Client IP belongs to IDC: aws","ip":"3.5.140.1","isRisky":false}`,
+	assert.JSONEq(t, `{"status":"idc","message":"Client IP belongs to IDC: aws","ip":"3.5.140.1","isRisky":false,"isIdc":true,"isProxy":false}`,
 		env.do(http.MethodGet, "/api/v1/ip", withRemote("3.5.140.1:1")).Body.String())
 }
 
@@ -378,7 +384,25 @@ func TestReady(t *testing.T) {
 	w := env.do(http.MethodGet, "/api/ready")
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Equal(t, "loading", statusOf(w.Body.String()))
+	assert.Contains(t, w.Body.String(), `"version": "test"`)
 	assert.Equal(t, http.StatusOK, env.do(http.MethodGet, "/api/status").Code)
+
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "1.2.3.0/24\n")
+	}))
+	defer feed.Close()
+	env = newTestEnv(t, func(c *config.Config) { c.Feeds = []feeds.Feed{{ID: "f", URL: feed.URL}} })
+	env.risk.Update(context.Background())
+	w = env.do(http.MethodGet, "/api/ready")
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body struct {
+		Status  string         `json:"status"`
+		Message map[string]any `json:"message"`
+	}
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ok", body.Status)
+	assert.Equal(t, "test", body.Message["version"])
+	assert.EqualValues(t, 1, body.Message["risk_prefixes"])
 }
 
 func TestCDNEndpoints(t *testing.T) {
@@ -416,4 +440,36 @@ func TestQQWryStats(t *testing.T) {
 	w := env.do(http.MethodGet, "/api/qqwry/stats")
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), `"loaded"`)
+}
+
+func TestCheckIP_ProxyAndIDCFlags(t *testing.T) {
+	vpn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "9.9.9.0/24\n")
+	}))
+	defer vpn.Close()
+	pub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "1.0.0.7:8080\n3.5.140.1:3128\n")
+	}))
+	defer pub.Close()
+	env := newTestEnv(t, func(c *config.Config) {
+		c.Feeds = []feeds.Feed{
+			{ID: "vpn", URL: vpn.URL, Tags: feeds.TagProxy},
+			{ID: "pub", URL: pub.URL, Format: feeds.FormatHostPort, Tags: feeds.TagProxy, TagOnly: true},
+		}
+	})
+	env.risk.Update(context.Background())
+
+	cases := map[string]string{
+		// 风险 + 代理
+		"9.9.9.9": `{"status":"risky","message":"IP is in risky list: vpn","ip":"9.9.9.9","isRisky":true,"isIdc":false,"isProxy":true}`,
+		// 仅标记的公开代理：不判定为风险
+		"1.0.0.7": `{"status":"ok","message":"IP is not risky","ip":"1.0.0.7","isRisky":false,"isIdc":false,"isProxy":true}`,
+		// IDC 网段上的公开代理：status 仍为 idc，两个标记同时为 true
+		"3.5.140.1": `{"status":"idc","message":"IP belongs to IDC: aws","ip":"3.5.140.1","isRisky":false,"isIdc":true,"isProxy":true}`,
+		// iCloud Private Relay（data/idc/apple.txt）视为代理
+		"104.28.100.10": `{"status":"idc","message":"IP belongs to IDC: apple","ip":"104.28.100.10","isRisky":false,"isIdc":true,"isProxy":true}`,
+	}
+	for ip, want := range cases {
+		assert.JSONEq(t, want, env.do(http.MethodGet, "/api/v1/ip/"+ip).Body.String(), ip)
+	}
 }

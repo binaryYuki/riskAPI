@@ -9,6 +9,18 @@ const (
 	FormatText Format = iota
 	// FormatRSS Project Honey Pot RSS，IP 位于 <item><title>
 	FormatRSS
+	// FormatHostPort 每行一个代理地址："ip:port"、"scheme://ip:port" 或 "[v6]:port"，去掉协议与端口
+	FormatHostPort
+)
+
+// Tag 数据源附带的属性标记，可组合；与是否进入风险表相互独立
+type Tag uint8
+
+const (
+	// TagProxy 代理 / VPN / Tor / 中继出口
+	TagProxy Tag = 1 << iota
+	// TagIDC 数据中心 / 云主机
+	TagIDC
 )
 
 // Feed 单个风险数据源；ID 作为命中原因返回给调用方
@@ -16,19 +28,28 @@ type Feed struct {
 	ID     string
 	URL    string
 	Format Format
+	Tags   Tag
+	// TagOnly 只贡献 Tags，不进入风险表（误报高或本身不代表恶意，如公开代理列表）
+	TagOnly bool
 }
 
 // DefaultFeeds 默认数据源。合并时按此顺序进行，同一前缀出现在多个源时后者的 ID 生效。
+//
+// 未收录（与现有数据重复）：feodo、dshield 已 100% 被 firehol-level1 等覆盖，
+// et-compromised 覆盖 99.7%；云厂商官方段已在 data/idc；
+// iCloud Private Relay 已由 data/idc/apple.txt 覆盖（netlists.ProxyProviders 标记为代理）。
 var DefaultFeeds = []Feed{
-	{ID: "X4BNet-datacenter", URL: "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt"},
-	{ID: "X4BNet-vpn", URL: "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt"},
-	{ID: "torproject-exit", URL: "https://check.torproject.org/exit-addresses"},
-	{ID: "dan.me.uk-tor", URL: "https://www.dan.me.uk/torlist/"},
-	{ID: "data-center-list", URL: "https://raw.githubusercontent.com/jhassine/server-ip-addresses/refs/heads/master/data/datacenters.txt"},
+	// 机房 IP 访问即视为风险（本质与 VPN 相同）；同时作为 isIdc 的备份来源，补充 data/idc 未覆盖的厂商
+	{ID: "X4BNet-datacenter", URL: "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt", Tags: TagIDC},
+	{ID: "X4BNet-vpn", URL: "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt", Tags: TagProxy},
+	{ID: "torproject-exit", URL: "https://check.torproject.org/exit-addresses", Tags: TagProxy},
+	{ID: "dan.me.uk-tor", URL: "https://www.dan.me.uk/torlist/", Tags: TagProxy},
+	{ID: "data-center-list", URL: "https://raw.githubusercontent.com/jhassine/server-ip-addresses/refs/heads/master/data/datacenters.txt", Tags: TagIDC},
 	{ID: "projecthoneypot", URL: "https://www.projecthoneypot.org/list_of_ips.php?t=d&rss=1", Format: FormatRSS},
-	{ID: "tor-bulk-exit", URL: "https://check.torproject.org/torbulkexitlist"},
+	{ID: "tor-bulk-exit", URL: "https://check.torproject.org/torbulkexitlist", Tags: TagProxy},
 	{ID: "danger.rulez.sk", URL: "https://danger.rulez.sk/projects/bruteforceblocker/blist.php"},
 	{ID: "spamhaus", URL: "https://www.spamhaus.org/drop/drop.txt"},
+	{ID: "spamhaus-dropv6", URL: "https://www.spamhaus.org/drop/dropv6.txt"},
 	{ID: "cinsscore", URL: "https://cinsscore.com/list/ci-badguys.txt"},
 	{ID: "blocklist.de", URL: "https://lists.blocklist.de/lists/all.txt"},
 	{ID: "firehol-cybercrime", URL: "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/cybercrime.ipset"},
@@ -37,6 +58,10 @@ var DefaultFeeds = []Feed{
 	{ID: "firehol-level3", URL: "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level3.netset"},
 	{ID: "firehol-level4", URL: "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level4.netset"},
 	{ID: "greensnow", URL: "https://blocklist.greensnow.co/greensnow.txt"},
+	{ID: "binarydefense", URL: "https://www.binarydefense.com/banlist.txt"},
+	{ID: "stopforumspam-toxic", URL: "https://www.stopforumspam.com/downloads/toxic_ip_cidr.txt"},
+	// AbuseIPDB 置信度 100、30 天内的镜像
+	{ID: "abuseipdb", URL: "https://raw.githubusercontent.com/borestad/blocklist-abuseipdb/main/abuseipdb-s100-30d.ipv4"},
 	// ipsum 第 N 级 = 出现在至少 N 个黑名单中，低级别包含高级别；按升序排列使每个 IP 取到其最高级别
 	{ID: "ipsum-level2", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/2.txt"},
 	{ID: "ipsum-level3", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/3.txt"},
@@ -45,4 +70,9 @@ var DefaultFeeds = []Feed{
 	{ID: "ipsum-level6", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/6.txt"},
 	{ID: "ipsum-level7", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/7.txt"},
 	{ID: "ipsum-level8", URL: "https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/8.txt"},
+	// 公开代理：变化快、误报多，只标记 isProxy，不判定为风险
+	{ID: "public-proxy-monosans", URL: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt", Format: FormatHostPort, Tags: TagProxy, TagOnly: true},
+	{ID: "public-proxy-speedx-http", URL: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", Format: FormatHostPort, Tags: TagProxy, TagOnly: true},
+	{ID: "public-proxy-speedx-socks4", URL: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt", Format: FormatHostPort, Tags: TagProxy, TagOnly: true},
+	{ID: "public-proxy-speedx-socks5", URL: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", Format: FormatHostPort, Tags: TagProxy, TagOnly: true},
 }

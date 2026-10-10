@@ -10,3 +10,6 @@ providers/qqwry/qqwry.dat
 providers/**/.geoipupdate.lock
 # WebRTC 检测脚本的前端依赖；构建产物 internal/httpapi/assets/webrtc.js 入库
 web/**/node_modules/
+.env
+stack.env
+

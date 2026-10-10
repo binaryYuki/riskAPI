@@ -66,6 +66,7 @@ func newTestEnv(t *testing.T, mutate ...func(*config.Config)) *testEnv {
 	cfg.ParseSecret = ""
 	cfg.ParseRateLimitPerMin = 0
 	cfg.Honeytrap = honeytrap.Config{Enabled: false}
+	cfg.Feeds = nil // 需要真实抓取的测试通过 mutate 指定，再调用 env.risk.Update
 	for _, m := range mutate {
 		m(&cfg)
 	}
@@ -74,7 +75,7 @@ func newTestEnv(t *testing.T, mutate ...func(*config.Config)) *testEnv {
 	log := discardLog()
 	env := &testEnv{
 		t:     t,
-		risk:  feeds.NewStore(nil, feeds.FetchConfig{}, log),
+		risk:  feeds.NewStore(cfg.Feeds, feeds.FetchConfig{Timeout: 2 * time.Second, Retries: 1}, log),
 		cache: cache.New(cfg.InfoCacheMaxEntries, cfg.InfoCacheTTL),
 	}
 	env.server = New(Deps{

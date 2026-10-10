@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"risky_ip_filter/internal/feeds"
 	"risky_ip_filter/internal/ipset"
 	"risky_ip_filter/internal/netlists"
 )
@@ -25,6 +26,8 @@ type ResponseWithIP struct {
 	Message any    `json:"message,omitempty"`
 	IP      string `json:"ip,omitempty"`
 	IsRisky bool   `json:"isRisky"` // 仅命中风险列表时为 true；CDN/IDC 不算
+	IsIDC   bool   `json:"isIdc"`   // 数据中心/云主机，与 status 无关（风险 IP 也可能同时为 IDC）
+	IsProxy bool   `json:"isProxy"` // 代理/VPN/Tor/中继出口，含不判定为风险的公开代理列表
 }
 
 // handleError 返回错误响应并中止后续处理
@@ -45,25 +48,37 @@ const (
 )
 
 type verdict struct {
-	kind   verdictKind
-	detail string // 风险来源或提供商
+	kind    verdictKind
+	detail  string // 风险来源或提供商
+	isIDC   bool   // 独立于 kind 的属性标记
+	isProxy bool
 }
 
-// classify 按优先级判定 IP 类别；调用方需先校验 IP 格式
+// classify 按优先级判定 IP 类别并计算属性标记；调用方需先校验 IP 格式
 func (s *Server) classify(ip string) verdict {
 	if ipset.IsBogonOrPrivate(ip) {
 		return verdict{kind: verdictPrivate}
 	}
+	tags := s.risk.Tags(ip)
+	idcProvider, inIDC := s.lists.IDC(ip)
+	v := verdict{
+		kind:    verdictClean,
+		isIDC:   inIDC || tags&feeds.TagIDC != 0,
+		isProxy: tags&feeds.TagProxy != 0 || (inIDC && netlists.IsProxyProvider(idcProvider)),
+	}
 	if source, ok := s.risk.Lookup(ip); ok {
-		return verdict{kind: verdictRisky, detail: source}
+		v.kind, v.detail = verdictRisky, source
+	} else if provider, ok := s.lists.CDN(ip); ok {
+		v.kind, v.detail = verdictCDN, provider
+	} else if inIDC {
+		v.kind, v.detail = verdictIDC, idcProvider
 	}
-	if provider, ok := s.lists.CDN(ip); ok {
-		return verdict{kind: verdictCDN, detail: provider}
-	}
-	if provider, ok := s.lists.IDC(ip); ok {
-		return verdict{kind: verdictIDC, detail: provider}
-	}
-	return verdict{kind: verdictClean}
+	return v
+}
+
+// newIPResponse 由判定结果填充布尔字段，Status/Message 由调用方设置
+func newIPResponse(ip string, v verdict) ResponseWithIP {
+	return ResponseWithIP{IP: ip, IsRisky: v.kind == verdictRisky, IsIDC: v.isIDC, IsProxy: v.isProxy}
 }
 
 // checkIP GET/POST /api/v1/ip/:ip 检查指定 IP
@@ -74,7 +89,7 @@ func (s *Server) checkIP(c *gin.Context) {
 		return
 	}
 	v := s.classify(ip)
-	resp := ResponseWithIP{IP: ip, IsRisky: v.kind == verdictRisky}
+	resp := newIPResponse(ip, v)
 	switch v.kind {
 	case verdictPrivate:
 		resp.Status, resp.Message = "ok", "IP is not risky (private/bogon)"
@@ -98,7 +113,7 @@ func (s *Server) checkRequestIP(c *gin.Context) {
 		return
 	}
 	v := s.classify(ip)
-	resp := ResponseWithIP{IP: ip, IsRisky: v.kind == verdictRisky}
+	resp := newIPResponse(ip, v)
 	switch v.kind {
 	case verdictPrivate:
 		resp.Status, resp.Message = "ok", "Client IP is not risky (private/bogon)"
@@ -186,12 +201,16 @@ func (s *Server) status(c *gin.Context) {
 }
 
 // ready 就绪检查：风险 IP 列表首轮加载完成前返回 503，
-// 供平台健康检查使用，避免新实例在数据为空时接流量（期间所有 IP 都会被判为 ok）
+// 供平台健康检查使用，避免新实例在数据为空时接流量（期间所有 IP 都会被判为 ok）。
+// 两种状态都带 version，部署后可据此确认新版本是否已上线
 func (s *Server) ready(c *gin.Context) {
 	if !s.risk.Ready() {
 		c.IndentedJSON(http.StatusServiceUnavailable, Response{
-			Status:  "loading",
-			Message: "risk IP lists are not loaded yet",
+			Status: "loading",
+			Message: gin.H{
+				"detail":  "risk IP lists are not loaded yet",
+				"version": s.version,
+			},
 		})
 		return
 	}
@@ -199,6 +218,7 @@ func (s *Server) ready(c *gin.Context) {
 	c.IndentedJSON(http.StatusOK, Response{
 		Status: "ok",
 		Message: gin.H{
+			"version":       s.version,
 			"risk_prefixes": s.risk.Snapshot().Len(),
 			"cdn_prefixes":  cdn,
 			"idc_prefixes":  idc,
