@@ -127,7 +127,6 @@ func (s *Server) webrtcScriptHandler(c *gin.Context) {
 	c.Header("Cache-Control", webrtcScriptCacheControl)
 	c.Header("CDN-Cache-Control", webrtcScriptCDNCache)
 	c.Header("ETag", webrtcScriptETag)
-	c.Header("X-Content-Type-Options", "nosniff")
 	if etagMatch(c.GetHeader("If-None-Match"), webrtcScriptETag) {
 		c.Status(http.StatusNotModified)
 		return
