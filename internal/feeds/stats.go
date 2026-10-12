@@ -1,7 +1,7 @@
 package feeds
 
 import (
-	"strings"
+	"net/netip"
 	"sync/atomic"
 	"time"
 
@@ -58,13 +58,10 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	}
 }
 
-// classify 统计单个合法条目：单 IP / CIDR，以及是否属于特殊网段
-func (s *Stats) classify(entry string) {
-	p, ok := ipset.ParseEntry(entry)
-	if !ok {
-		return
-	}
-	if p.IsSingleIP() && !strings.Contains(entry, "/") {
+// classify 统计单个合法条目：单 IP / CIDR，以及是否属于特殊网段。
+// cidr 表示源里写成带掩码的形式，"1.2.3.4/32" 也按 CIDR 计。
+func (s *Stats) classify(p netip.Prefix, cidr bool) {
+	if !cidr {
 		s.parsedIPs.Add(1)
 	} else {
 		s.parsedCIDRs.Add(1)

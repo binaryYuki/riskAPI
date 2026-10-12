@@ -2,11 +2,12 @@
 # 下载地理位置数据库到 providers/（CI 构建镜像前执行；本地开发同样适用）。
 #
 # 每个文件的处理顺序：
-#   1. 先取 GitHub Release "geo-data" 中的最近一次成功版本作为兜底（需要 gh 已登录或 GH_TOKEN）
+#   1. 先取上游仓库 GitHub Release "geo-data" 中的最近一次成功版本作为兜底（需要 gh 已登录或 GH_TOKEN）
 #   2. 再从源头下载最新版，校验数据库类型与大小通过后才替换
 # 单个源失败不影响其它源；最终仍缺文件时以非零状态退出。
 #
-# 可选环境变量：MAXMIND_ACCOUNT_ID / MAXMIND_LICENSE_KEY、IPINFO_TOKEN（未设置则只用兜底版本）
+# 可选环境变量：MAXMIND_ACCOUNT_ID / MAXMIND_LICENSE_KEY、IPINFO_TOKEN（未设置则只用兜底版本）；
+#   GEO_DATA_REPO 兜底 Release 所在仓库（默认上游；fork 仓库里没有该 Release，因此不跟随 GITHUB_REPOSITORY）
 #
 # MaxMind 支持多个 key（逗号分隔），某个 key 达到下载上限或失效时自动换下一个：
 #   MAXMIND_LICENSE_KEY=keyA,keyB
@@ -15,7 +16,7 @@
 set -euo pipefail
 
 DEST="${DEST:-providers}"
-REPO="${GITHUB_REPOSITORY:-binaryYuki/riskAPI}"
+REPO="${GEO_DATA_REPO:-binaryYuki/riskAPI}"
 RELEASE_TAG="geo-data"
 FILES="GeoLite2-ASN.mmdb GeoLite2-Country.mmdb ipinfo-asn.mmdb ipinfo-country.mmdb iplocate-asn.mmdb iplocate-country.mmdb qqwry.dat"
 

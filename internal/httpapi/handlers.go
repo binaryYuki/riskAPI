@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"risky_ip_filter/internal/feeds"
+	"risky_ip_filter/internal/honeytrap"
 	"risky_ip_filter/internal/ipset"
 	"risky_ip_filter/internal/netlists"
 )
@@ -25,7 +26,7 @@ type ResponseWithIP struct {
 	Status  string `json:"status"`
 	Message any    `json:"message,omitempty"`
 	IP      string `json:"ip,omitempty"`
-	IsRisky bool   `json:"isRisky"` // 仅命中风险列表时为 true；CDN/IDC 不算
+	IsRisky bool   `json:"isRisky"` // 命中风险列表或被本服务蜜罐标记时为 true；CDN/IDC 不算
 	IsIDC   bool   `json:"isIdc"`   // 数据中心/云主机，与 status 无关（风险 IP 也可能同时为 IDC）
 	IsProxy bool   `json:"isProxy"` // 代理/VPN/Tor/中继出口，含不判定为风险的公开代理列表
 }
@@ -36,7 +37,8 @@ func handleError(c *gin.Context, statusCode int, message string) {
 	c.Abort()
 }
 
-// verdictKind IP 判定结果类别，优先级依次为 private > risky > cdn > idc > clean
+// verdictKind IP 判定结果类别，优先级依次为 private > risky > cdn > idc > clean；
+// risky 的来源见 riskSource
 type verdictKind int
 
 const (
@@ -66,7 +68,7 @@ func (s *Server) classify(ip string) verdict {
 		isIDC:   inIDC || tags&feeds.TagIDC != 0,
 		isProxy: tags&feeds.TagProxy != 0 || (inIDC && netlists.IsProxyProvider(idcProvider)),
 	}
-	if source, ok := s.risk.Lookup(ip); ok {
+	if source, ok := s.riskSource(ip); ok {
 		v.kind, v.detail = verdictRisky, source
 	} else if provider, ok := s.lists.CDN(ip); ok {
 		v.kind, v.detail = verdictCDN, provider
@@ -74,6 +76,20 @@ func (s *Server) classify(ip string) verdict {
 		v.kind, v.detail = verdictIDC, idcProvider
 	}
 	return v
+}
+
+// riskSource 返回 IP 的风险来源：优先风险列表，其次是被本服务蜜罐标记的来源。
+// CDN 回源网段不采信蜜罐标记：它们只会在客户端 IP 解析出错时被记到
+func (s *Server) riskSource(ip string) (string, bool) {
+	if source, ok := s.risk.Lookup(ip); ok {
+		return source, true
+	}
+	if s.trap.Flagged(ip) {
+		if _, isCDN := s.lists.CDN(ip); !isCDN {
+			return honeytrap.Source, true
+		}
+	}
+	return "", false
 }
 
 // newIPResponse 由判定结果填充布尔字段，Status/Message 由调用方设置
@@ -148,7 +164,7 @@ func (s *Server) filterProxies(c *gin.Context) {
 		if ip == "" {
 			continue // 无法解析出 IP 的代理直接丢弃
 		}
-		if _, risky := s.risk.Lookup(ip); !risky {
+		if _, risky := s.riskSource(ip); !risky {
 			kept = append(kept, p)
 		}
 	}

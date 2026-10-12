@@ -360,6 +360,7 @@ func TestMetricsPrometheus(t *testing.T) {
 	assert.Contains(t, body, `riskapi_build_info{version="test"} 1`)
 	assert.Contains(t, body, "riskapi_ready 0\n")
 	assert.Contains(t, body, "# TYPE riskapi_honeytrap_hits_total counter")
+	assert.Contains(t, body, "# TYPE riskapi_honeytrap_flagged_sources gauge")
 }
 
 func TestExportCIDRs(t *testing.T) {
