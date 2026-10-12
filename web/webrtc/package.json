@@ -1,0 +1,13 @@
+{
+  "name": "riskapi-webrtc",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "javascript-obfuscator": "5.8.0",
+    "typescript": "6.0.3"
+  }
+}

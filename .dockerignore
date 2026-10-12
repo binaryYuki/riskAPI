@@ -38,4 +38,5 @@ vendor/
 **/obj
 **/secrets.dev.yaml
 **/values.dev.yaml
-LICENSE
+LICENSE# 镜像只需已入库的构建产物（internal/httpapi/assets），不需要前端源码与依赖
+web
