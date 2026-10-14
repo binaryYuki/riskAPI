@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"risky_ip_filter/internal/honeytrap"
 	"risky_ip_filter/internal/httpapi"
 	"risky_ip_filter/internal/netlists"
+	"risky_ip_filter/internal/risktoken"
 	"risky_ip_filter/internal/telemetry"
 )
 
@@ -78,6 +80,14 @@ func run(cfg config.Config, tel *telemetry.Telemetry) error {
 		go trap.RunJanitor(ctx)
 	}
 
+	signer, err := newSigner(cfg.RiskToken)
+	if err != nil {
+		return err
+	}
+	if signer != nil {
+		log.Info("risk token signing enabled", "kid", signer.KeyID(), "ttl", cfg.RiskToken.TTL)
+	}
+
 	if os.Getenv(gin.EnvGinMode) == "" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -92,6 +102,7 @@ func run(cfg config.Config, tel *telemetry.Telemetry) error {
 		Trap:      trap,
 		// 为 nil 时不加载 otelgin 中间件
 		TracerProvider: tel.TracerProvider,
+		Signer:         signer,
 	})
 
 	srv := &http.Server{
@@ -124,4 +135,20 @@ func run(cfg config.Config, tel *telemetry.Telemetry) error {
 	}
 	log.Info("server stopped")
 	return nil
+}
+
+// newSigner 未配置 RISK_SIGNING_KEY 时返回 nil（v2 不签发令牌）；配置有误时启动失败，避免静默降级
+func newSigner(cfg config.RiskTokenConfig) (*risktoken.Signer, error) {
+	if cfg.SigningKey == "" {
+		return nil, nil
+	}
+	priv, err := risktoken.ParsePrivateKey(cfg.SigningKey)
+	if err != nil {
+		return nil, fmt.Errorf("RISK_SIGNING_KEY: %w", err)
+	}
+	extra, err := risktoken.ParsePublishedKeys(cfg.PublishedKeys)
+	if err != nil {
+		return nil, fmt.Errorf("RISK_PUBLISHED_KEYS: %w", err)
+	}
+	return risktoken.NewSigner(priv, cfg.KeyID, cfg.TTL, extra)
 }

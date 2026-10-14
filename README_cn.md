@@ -118,6 +118,11 @@ docker-compose up -d
 | `PARSE_WORKER_BASE` | 上游解析 Worker 地址 | `https://xhs-proxy.tzpro.workers.dev` |
 | `PARSE_RATE_LIMIT_PER_MIN` | `/api/v1/parse` 每个客户端 IP 每分钟请求上限（`0` 不限流） | `30` |
 | `INFO_CACHE_MAX_ENTRIES` | `/api/v1/info` 缓存最大条目数（TTL 1 小时） | `20000` |
+| `RISK_SIGNING_KEY` | `/api/v2` 令牌的 Ed25519 私钥：PEM（PKCS#8）或 32 字节种子 / PKCS#8 DER 的 base64（`openssl genpkey -algorithm ed25519 -outform DER \| base64`）。格式错误时启动失败 | _(未设置：v2 不签发令牌)_ |
+| `RISK_SIGNING_KID` | 写入令牌和 `/.well-known/risk-keys.json` 的密钥 ID | 公钥指纹 |
+| `RISK_PUBLISHED_KEYS` | 轮换期间继续公布的旧公钥，`kid=base64` 逗号分隔 | _(未设置)_ |
+| `RISK_TOKEN_TTL_SEC` | 令牌有效期（秒） | `120` |
+| `RISK_TOKEN_AUDIENCES` | 允许的 `aud` 域名，逗号分隔；`*.example.com` 匹配任意层级子域名但不含 `example.com` 本身，主域名需另写（为空不限制） | _(未设置)_ |
 | `LISTEN_ADDR` | 监听地址 | `:8080` |
 | `LOG_FORMAT` | 日志格式：`text` 或 `json` | `text` |
 | `LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
@@ -152,6 +157,42 @@ GET /api/v1/ip
 ```
 
 `isRisky` 仅在命中风险列表时为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
+
+### 1.1 签名结果 (v2)
+```bash
+# 请求方 IP 风险判定，带签名
+GET /api/v2/ip?aud={接入站点域名}&nonce={一次性随机串}
+
+# 请求方 IP 地理位置 + 风险判定，带签名（只查请求方自身，没有 /{ip} 形式）
+GET /api/v2/info?aud={接入站点域名}&nonce={一次性随机串}
+
+# 验签公钥（JWK Set，OKP/Ed25519，按 kid 列出）
+GET /.well-known/risk-keys.json
+```
+
+浏览器请求 v2，把 `token` 原样转交给接入站点的服务端，服务端用公布的公钥验签；任何字段被篡改签名都会失效。v2 响应为 v1 的内容加上 `token`（`/api/v2/info` 还带 `isRisky` / `isIdc` / `isProxy`）：
+
+```json
+{
+  "status": "ok", "message": "IP is not listed as risky.", "ip": "2a00:…",
+  "isRisky": false, "isIdc": false, "isProxy": false,
+  "token": "<base64url(payload)>.<base64url(Ed25519 签名)>"
+}
+```
+
+签名覆盖第一段的 ASCII 字节（两段均为不带填充的 base64url）。payload：
+
+```json
+{ "v": 1, "kid": "2026-10", "ip": "2a00:…", "status": "ok", "isRisky": false, "isIdc": false, "isProxy": false,
+  "aud": "gdue-ca.paperee.guru", "nonce": "…", "iat": 1791979000, "exp": 1791979120 }
+```
+
+接入方需校验：签名（按 `kid` 选公钥）、`exp`、`aud` 等于本站域名、`nonce` 是本站下发且未使用过的、`ip` 与本站看到的访客 IP 一致（IPv6 按 /64 比较）。
+
+- `aud` 与 `nonce` 要么都带、要么都不带：都不带时不签发令牌；只带其一返回 400。`aud` 必须是纯域名；`nonce` 为 8～128 位 `[A-Za-z0-9._~-]`。
+- 未配置签名返回 503；`aud` 不在 `RISK_TOKEN_AUDIENCES` 中返回 403；请求带 `Origin` 且其主机名与 `aud` 不一致返回 403。
+- v2 与 `/.well-known/risk-keys.json` 返回 `Access-Control-Allow-Origin: *`，不带凭据；v1 的 CORS 不变。公钥集合可缓存 5 分钟。
+- 轮换密钥：把 `RISK_SIGNING_KEY` / `RISK_SIGNING_KID` 换成新密钥，旧公钥写入 `RISK_PUBLISHED_KEYS`，至少保留令牌有效期 + 公钥缓存时间。
 
 ### 2. 地理位置查询 (新功能)
 ```bash

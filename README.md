@@ -121,6 +121,11 @@ docker-compose up -d
 | `PARSE_WORKER_BASE` | Upstream parse worker base URL | `https://xhs-proxy.tzpro.workers.dev` |
 | `PARSE_RATE_LIMIT_PER_MIN` | Per-client-IP limit for `/api/v1/parse` (`0` disables) | `30` |
 | `INFO_CACHE_MAX_ENTRIES` | Max `/api/v1/info` cache entries (1h TTL) | `20000` |
+| `RISK_SIGNING_KEY` | Ed25519 private key for `/api/v2` tokens: PEM (PKCS#8) or base64 of the 32-byte seed / PKCS#8 DER (`openssl genpkey -algorithm ed25519 -outform DER \| base64`). Startup fails if it is invalid | _(unset: v2 issues no tokens)_ |
+| `RISK_SIGNING_KID` | Key id written into tokens and `/.well-known/risk-keys.json` | public-key fingerprint |
+| `RISK_PUBLISHED_KEYS` | Old public keys to keep publishing during rotation, `kid=base64` comma-separated | _(unset)_ |
+| `RISK_TOKEN_TTL_SEC` | Token lifetime (seconds) | `120` |
+| `RISK_TOKEN_AUDIENCES` | Allowed `aud` host names, comma-separated; `*.example.com` matches any subdomain but not `example.com` itself, so list both for apex + subdomains (empty = any) | _(unset)_ |
 | `LISTEN_ADDR` | Listen address | `:8080` |
 | `LOG_FORMAT` | Log format: `text` or `json` | `text` |
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
@@ -155,6 +160,42 @@ GET /api/v1/ip
 ```
 
 `isRisky` is true only for risk-list hits. `isIdc` / `isProxy` are independent flags: `isIdc` covers data/idc cloud ranges and datacenter feeds; `isProxy` covers VPN/Tor/iCloud Private Relay and public proxy lists (public proxies only set the flag, they do not make an IP risky).
+
+### 1.1 Signed Results (v2)
+```bash
+# Requester IP verdict, signed
+GET /api/v2/ip?aud={site host}&nonce={one-time random string}
+
+# Requester IP geolocation + verdict, signed (requester only, no /{ip} form)
+GET /api/v2/info?aud={site host}&nonce={one-time random string}
+
+# Verification public keys (JWK Set, OKP/Ed25519, by kid)
+GET /.well-known/risk-keys.json
+```
+
+The browser calls v2 and forwards `token` unchanged to the integrating site's backend, which verifies it with the published public key, so tampering with any field invalidates the signature. v2 responses are the v1 bodies plus `token` (`/api/v2/info` also carries `isRisky` / `isIdc` / `isProxy`):
+
+```json
+{
+  "status": "ok", "message": "IP is not listed as risky.", "ip": "2a00:…",
+  "isRisky": false, "isIdc": false, "isProxy": false,
+  "token": "<base64url(payload)>.<base64url(Ed25519 signature)>"
+}
+```
+
+The signature covers the ASCII bytes of the first segment (both segments unpadded base64url). Payload:
+
+```json
+{ "v": 1, "kid": "2026-10", "ip": "2a00:…", "status": "ok", "isRisky": false, "isIdc": false, "isProxy": false,
+  "aud": "gdue-ca.paperee.guru", "nonce": "…", "iat": 1791979000, "exp": 1791979120 }
+```
+
+The verifier must check: signature (key chosen by `kid`), `exp`, `aud` equals its own host, `nonce` equals the one it issued and has not been used, and `ip` matches the visitor IP it sees (compare IPv6 by /64).
+
+- `aud` and `nonce` are optional together: without both, no token is issued. Only one of them → 400. `aud` must be a bare host name; `nonce` must be 8–128 chars of `[A-Za-z0-9._~-]`.
+- Signing not configured → 503; `aud` outside `RISK_TOKEN_AUDIENCES` → 403; an `Origin` header whose host differs from `aud` → 403.
+- v2 and `/.well-known/risk-keys.json` send `Access-Control-Allow-Origin: *` without credentials; v1 CORS is unchanged. The key set is cacheable for 5 minutes.
+- Key rotation: switch `RISK_SIGNING_KEY` / `RISK_SIGNING_KID` to the new key and list the old public key in `RISK_PUBLISHED_KEYS` for at least the token TTL plus the key-set cache time.
 
 ### 2. Geolocation Query (New Feature)
 ```bash

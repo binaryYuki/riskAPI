@@ -44,6 +44,17 @@ type Config struct {
 	Feeds              []feeds.Feed
 
 	Honeytrap honeytrap.Config
+
+	RiskToken RiskTokenConfig
+}
+
+// RiskTokenConfig /api/v2 结果签名配置；SigningKey 为空时 v2 接口不签发令牌
+type RiskTokenConfig struct {
+	SigningKey    string        // RISK_SIGNING_KEY：Ed25519 私钥（PEM 或 base64 的种子/PKCS#8 DER）
+	KeyID         string        // RISK_SIGNING_KID：为空时由公钥指纹派生
+	PublishedKeys []string      // RISK_PUBLISHED_KEYS：轮换期间继续公布的旧公钥，kid=base64 逗号分隔
+	TTL           time.Duration // RISK_TOKEN_TTL_SEC：令牌有效期
+	Audiences     []string      // RISK_TOKEN_AUDIENCES：允许的 aud 域名，*.example.com 匹配子域名，为空时不限制
 }
 
 // OTelConfig OpenTelemetry 上报配置，仅在 OpenTelemetry 开启时生效。
@@ -117,6 +128,14 @@ func Load() Config {
 			BlockWindow:    time.Duration(envInt("HONEYTRAP_BLOCK_WINDOW_SEC", 60)) * time.Second,
 			BlockDuration:  time.Duration(envInt("HONEYTRAP_BLOCK_DURATION_SEC", 180)) * time.Second,
 			MaxOffenders:   envInt("HONEYTRAP_MAX_OFFENDERS", 100000),
+		},
+
+		RiskToken: RiskTokenConfig{
+			SigningKey:    os.Getenv("RISK_SIGNING_KEY"),
+			KeyID:         envString("RISK_SIGNING_KID", ""),
+			PublishedKeys: envList("RISK_PUBLISHED_KEYS", nil),
+			TTL:           time.Duration(envInt("RISK_TOKEN_TTL_SEC", 120)) * time.Second,
+			Audiences:     envList("RISK_TOKEN_AUDIENCES", nil),
 		},
 	}
 }
