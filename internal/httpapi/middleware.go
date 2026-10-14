@@ -50,10 +50,10 @@ func (s *Server) requestLog(c *gin.Context) *slog.Logger {
 	return s.log.With("correlation_id", correlationID(c))
 }
 
-// requestLogger 记录访问日志；/.well-known/ 直接 404 且不记录
+// requestLogger 记录访问日志；/.well-known/ 除验签公钥外直接 404 且不记录
 func (s *Server) requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, "/.well-known/") {
+		if path := c.Request.URL.Path; strings.HasPrefix(path, "/.well-known/") && path != riskKeysPath {
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
