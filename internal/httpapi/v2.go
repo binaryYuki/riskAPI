@@ -59,7 +59,7 @@ func (s *Server) parseTokenRequest(c *gin.Context) (tokenRequest, bool) {
 		handleError(c, http.StatusBadRequest, "nonce must be 8-128 characters of [A-Za-z0-9._~-]")
 	case s.signer == nil:
 		handleError(c, http.StatusServiceUnavailable, "token signing is not configured")
-	case len(s.audiences) > 0 && !s.audiences[aud]:
+	case !s.audiences.allows(aud):
 		handleError(c, http.StatusForbidden, "aud is not allowed")
 	case !originMatchesAudience(c.GetHeader("Origin"), aud):
 		// 浏览器跨域请求的 Origin 无法被页面脚本伪造：别的站点不能替本站申请令牌
@@ -149,6 +149,41 @@ func (s *Server) riskKeys(c *gin.Context) {
 	// 覆盖全局 no-store：公钥可短时缓存，轮换时旧公钥会继续公布一段时间
 	c.Header("Cache-Control", "public, max-age=300")
 	c.IndentedJSON(http.StatusOK, s.signer.KeySet())
+}
+
+// audiencePolicy RISK_TOKEN_AUDIENCES：精确域名，或 "*.example.com" 匹配其任意层级子域名（不含 example.com 本身）
+type audiencePolicy struct {
+	exact    map[string]bool
+	suffixes []string // ".example.com"
+}
+
+func newAudiencePolicy(items []string) audiencePolicy {
+	p := audiencePolicy{exact: map[string]bool{}}
+	for _, item := range items {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if domain, ok := strings.CutPrefix(item, "*."); ok && domain != "" {
+			p.suffixes = append(p.suffixes, "."+domain)
+		} else if item != "" {
+			p.exact[item] = true
+		}
+	}
+	return p
+}
+
+// allows 未配置任何条目时不限制
+func (p audiencePolicy) allows(aud string) bool {
+	if len(p.exact) == 0 && len(p.suffixes) == 0 {
+		return true
+	}
+	if p.exact[aud] {
+		return true
+	}
+	for _, suffix := range p.suffixes {
+		if strings.HasSuffix(aud, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isValidAudience aud 只接受小写主机名（不含端口与协议）

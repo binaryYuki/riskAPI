@@ -122,7 +122,7 @@ docker-compose up -d
 | `RISK_SIGNING_KID` | 写入令牌和 `/.well-known/risk-keys.json` 的密钥 ID | 公钥指纹 |
 | `RISK_PUBLISHED_KEYS` | 轮换期间继续公布的旧公钥，`kid=base64` 逗号分隔 | _(未设置)_ |
 | `RISK_TOKEN_TTL_SEC` | 令牌有效期（秒） | `120` |
-| `RISK_TOKEN_AUDIENCES` | 允许的 `aud` 域名，逗号分隔（为空不限制） | _(未设置)_ |
+| `RISK_TOKEN_AUDIENCES` | 允许的 `aud` 域名，逗号分隔；`*.example.com` 匹配任意层级子域名但不含 `example.com` 本身，主域名需另写（为空不限制） | _(未设置)_ |
 | `LISTEN_ADDR` | 监听地址 | `:8080` |
 | `LOG_FORMAT` | 日志格式：`text` 或 `json` | `text` |
 | `LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |

@@ -113,6 +113,30 @@ func TestV2TokenParamValidation(t *testing.T) {
 	}
 }
 
+func TestAudiencePolicy(t *testing.T) {
+	p := newAudiencePolicy([]string{" Catyuki.com ", "*.catyuki.com", "gdue-ca.paperee.guru", "", "*."})
+	for aud, want := range map[string]bool{
+		"catyuki.com":            true,
+		"www.catyuki.com":        true,
+		"a.b.catyuki.com":        true,
+		"evilcatyuki.com":        false,
+		"catyuki.com.evil.com":   false,
+		"gdue-ca.paperee.guru":   true,
+		"x.gdue-ca.paperee.guru": false,
+		"paperee.guru":           false,
+	} {
+		assert.Equal(t, want, p.allows(aud), aud)
+	}
+	assert.True(t, newAudiencePolicy(nil).allows("anything.example"))
+
+	env := newTestEnv(t, withSigning("*.catyuki.com"))
+	w := env.do(http.MethodGet, "/api/v2/ip?aud=risk.catyuki.com&nonce="+testNonce,
+		withRemote("192.168.1.5:1"), withHeader("Origin", "https://risk.catyuki.com"))
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	w = env.do(http.MethodGet, "/api/v2/ip?aud=catyuki.com&nonce="+testNonce, withRemote("192.168.1.5:1"))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
 func TestIPInfoV2(t *testing.T) {
 	env := newTestEnv(t, withSigning())
 	// 私网地址不触发外部查询

@@ -54,7 +54,7 @@ type RiskTokenConfig struct {
 	KeyID         string        // RISK_SIGNING_KID：为空时由公钥指纹派生
 	PublishedKeys []string      // RISK_PUBLISHED_KEYS：轮换期间继续公布的旧公钥，kid=base64 逗号分隔
 	TTL           time.Duration // RISK_TOKEN_TTL_SEC：令牌有效期
-	Audiences     []string      // RISK_TOKEN_AUDIENCES：允许的 aud 域名，为空时不限制
+	Audiences     []string      // RISK_TOKEN_AUDIENCES：允许的 aud 域名，*.example.com 匹配子域名，为空时不限制
 }
 
 // OTelConfig OpenTelemetry 上报配置，仅在 OpenTelemetry 开启时生效。

@@ -125,7 +125,7 @@ docker-compose up -d
 | `RISK_SIGNING_KID` | Key id written into tokens and `/.well-known/risk-keys.json` | public-key fingerprint |
 | `RISK_PUBLISHED_KEYS` | Old public keys to keep publishing during rotation, `kid=base64` comma-separated | _(unset)_ |
 | `RISK_TOKEN_TTL_SEC` | Token lifetime (seconds) | `120` |
-| `RISK_TOKEN_AUDIENCES` | Allowed `aud` host names, comma-separated (empty = any) | _(unset)_ |
+| `RISK_TOKEN_AUDIENCES` | Allowed `aud` host names, comma-separated; `*.example.com` matches any subdomain but not `example.com` itself, so list both for apex + subdomains (empty = any) | _(unset)_ |
 | `LISTEN_ADDR` | Listen address | `:8080` |
 | `LOG_FORMAT` | Log format: `text` or `json` | `text` |
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |

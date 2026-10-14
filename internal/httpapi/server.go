@@ -56,7 +56,7 @@ type Server struct {
 	forbiddenPage  []byte
 	tracerProvider trace.TracerProvider
 	signer         *risktoken.Signer
-	audiences      map[string]bool // 允许的 aud，为空时不限制
+	audiences      audiencePolicy
 }
 
 // New 创建 Server
@@ -74,7 +74,7 @@ func New(d Deps) *Server {
 		parseClient:    d.ParseClient,
 		tracerProvider: d.TracerProvider,
 		signer:         d.Signer,
-		audiences:      audienceSet(d.Config.RiskToken.Audiences),
+		audiences:      newAudiencePolicy(d.Config.RiskToken.Audiences),
 		forbiddenPage:  loadForbiddenPage(filepath.Join(d.Config.DataDir, "pages", "403.html"), d.Log),
 	}
 	if s.parseClient == nil {
@@ -171,17 +171,6 @@ func (s *Server) cors() gin.HandlerFunc {
 
 func isPublicCORSPath(path string) bool {
 	return strings.HasPrefix(path, "/api/v2/") || path == riskKeysPath
-}
-
-// audienceSet 规范化允许的 aud 列表
-func audienceSet(items []string) map[string]bool {
-	set := map[string]bool{}
-	for _, item := range items {
-		if item = strings.ToLower(strings.TrimSpace(item)); item != "" {
-			set[item] = true
-		}
-	}
-	return set
 }
 
 // corsConfig 仅允许 https 下的白名单域名及其子域名
