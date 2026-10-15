@@ -95,6 +95,7 @@ func TestV2TokenParamValidation(t *testing.T) {
 		{"aud not allowed", signed, "aud=evil.example&nonce=" + testNonce, "https://evil.example", http.StatusForbidden},
 		{"origin mismatch", signed, "aud=gdue-ca.paperee.guru&nonce=" + testNonce, "https://evil.example", http.StatusForbidden},
 		{"null origin", signed, "aud=gdue-ca.paperee.guru&nonce=" + testNonce, "null", http.StatusForbidden},
+		{"nonce with colon", signed, "aud=gdue-ca.paperee.guru&nonce=1792005347:Jx9Ek91M-HnI0rBv", "", http.StatusOK},
 		{"aud case-insensitive", signed, "aud=GDUE-CA.paperee.guru&nonce=" + testNonce, "https://gdue-ca.paperee.guru", http.StatusOK},
 		{"server-side call", signed, "aud=gdue-ca.paperee.guru&nonce=" + testNonce, "", http.StatusOK},
 	}

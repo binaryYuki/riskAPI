@@ -56,7 +56,7 @@ func (s *Server) parseTokenRequest(c *gin.Context) (tokenRequest, bool) {
 	case !isValidAudience(aud):
 		handleError(c, http.StatusBadRequest, "aud must be a host name")
 	case !isValidNonce(nonce):
-		handleError(c, http.StatusBadRequest, "nonce must be 8-128 characters of [A-Za-z0-9._~-]")
+		handleError(c, http.StatusBadRequest, "nonce must be 8-128 characters of [A-Za-z0-9._~:-]")
 	case s.signer == nil:
 		handleError(c, http.StatusServiceUnavailable, "token signing is not configured")
 	case !s.audiences.allows(aud):
@@ -205,7 +205,7 @@ func isValidNonce(nonce string) bool {
 		return false
 	}
 	for _, r := range nonce {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._~-", r)) {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._~:-", r)) {
 			return false
 		}
 	}

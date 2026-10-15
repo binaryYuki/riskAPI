@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -85,7 +86,12 @@ func run(cfg config.Config, tel *telemetry.Telemetry) error {
 		return err
 	}
 	if signer != nil {
-		log.Info("risk token signing enabled", "kid", signer.KeyID(), "ttl", cfg.RiskToken.TTL)
+		audiences := "any"
+		if len(cfg.RiskToken.Audiences) > 0 {
+			audiences = strings.Join(cfg.RiskToken.Audiences, ",")
+		}
+		// 打印实际生效的白名单，改完环境变量后看启动日志即可确认
+		log.Info("risk token signing enabled", "kid", signer.KeyID(), "ttl", cfg.RiskToken.TTL, "audiences", audiences)
 	}
 
 	if os.Getenv(gin.EnvGinMode) == "" {
