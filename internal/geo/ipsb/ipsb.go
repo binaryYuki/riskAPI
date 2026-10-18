@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 // GeoResponse models the ip.sb geoip API response.
@@ -31,19 +33,41 @@ type GeoResponse struct {
 	Languages     []string `json:"languages"`
 }
 
-const (
-	baseURL = "https://api.ip.sb/geoip"
-	ua      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
+const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+// baseURL 测试时替换为 httptest 地址
+var baseURL = "https://api.ip.sb/geoip"
+
+// Client ip.sb 查询客户端，可并发使用：复用长连接，并按 perSecond 均匀限速（ip.sb 限制 5 次/秒）
+type Client struct {
+	http    *http.Client
+	limiter *rate.Limiter
+}
+
+// NewClient perSecond <= 0 表示不限速
+func NewClient(perSecond float64) *Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = 8 // 默认仅 2，并发查询时会频繁新建 TLS 连接
+	limit := rate.Inf
+	if perSecond > 0 {
+		limit = rate.Limit(perSecond)
+	}
+	return &Client{
+		http: &http.Client{Timeout: 5 * time.Second, Transport: t},
+		// burst=1：请求间隔至少 1/perSecond，任意 1 秒窗口内都不会超过上限
+		limiter: rate.NewLimiter(limit, 1),
+	}
+}
 
 // Query fetches geo information for an IP using ip.sb public API.
 // Returned map is normalized (snake_case keys) and omits the raw IP field.
-func Query(ctx context.Context, ip string, client *http.Client) (map[string]interface{}, error) {
+// 等待限速配额超过 ctx 截止时间时立即返回错误。
+func (c *Client) Query(ctx context.Context, ip string) (map[string]interface{}, error) {
 	if net.ParseIP(ip) == nil {
 		return nil, errors.New("invalid ip")
 	}
-	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
+	if err := c.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("ip.sb rate limit: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/%s", baseURL, ip)
@@ -55,7 +79,7 @@ func Query(ctx context.Context, ip string, client *http.Client) (map[string]inte
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
 
-	resp, err := client.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
