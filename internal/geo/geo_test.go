@@ -36,6 +36,19 @@ func TestMMDBReaderIsReused(t *testing.T) {
 	assert.ErrorIs(t, err, errMMDBUnavailable)
 }
 
+func TestMaxMindCityFields(t *testing.T) {
+	db := filepath.Join(providersDir, "maxmind/GeoLite2-City.mmdb")
+	if !fileNonEmpty(db) {
+		t.Skip("GeoLite2-City.mmdb not present")
+	}
+	data, err := newTestService().lookupMMDB(db, net.ParseIP("8.8.8.8"))
+	assert.NoError(t, err)
+	m, ok := data.(map[string]any)
+	assert.True(t, ok)
+	assert.Contains(t, m, "country")
+	assert.Contains(t, m, "location")
+}
+
 func TestIsChina(t *testing.T) {
 	assert.True(t, isChina(map[string]any{"ipinfo": map[string]any{"country": "CN"}}))
 	assert.True(t, isChina(map[string]any{"maxmind": map[string]any{"country": map[string]any{"iso_code": "CN"}}}))

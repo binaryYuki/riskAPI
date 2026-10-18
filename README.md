@@ -15,7 +15,7 @@ A high-performance Go-based service providing comprehensive IP risk detection, g
 
 ### 🌍 Geolocation Query (`/api/v1/info`)
 - **Multi-source Data Fusion**: Integrates 7 geolocation databases
-  - MaxMind GeoLite2 (Country/ASN)
+  - MaxMind GeoLite2 (Country/City/ASN)
   - IPInfo (Country/ASN)
   - IPLocate (Country/ASN)
   - QQWry Database (High accuracy for Chinese regions)

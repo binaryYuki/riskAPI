@@ -17,7 +17,7 @@ set -euo pipefail
 DEST="${DEST:-providers}"
 REPO="${GITHUB_REPOSITORY:-binaryYuki/riskAPI}"
 RELEASE_TAG="geo-data"
-FILES="GeoLite2-ASN.mmdb GeoLite2-Country.mmdb ipinfo-asn.mmdb ipinfo-country.mmdb iplocate-asn.mmdb iplocate-country.mmdb qqwry.dat"
+FILES="GeoLite2-ASN.mmdb GeoLite2-Country.mmdb GeoLite2-City.mmdb ipinfo-asn.mmdb ipinfo-country.mmdb iplocate-asn.mmdb iplocate-country.mmdb qqwry.dat"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -39,6 +39,7 @@ expected_type() {
   case "$1" in
     GeoLite2-ASN.mmdb) echo "GeoLite2-ASN" ;;
     GeoLite2-Country.mmdb) echo "GeoLite2-Country" ;;
+    GeoLite2-City.mmdb) echo "GeoLite2-City" ;;
     ipinfo-asn.mmdb) echo "ipinfo" ;;
     ipinfo-country.mmdb) echo "ipinfo" ;;
     iplocate-asn.mmdb) echo "iplocate ip-to-asn" ;;
@@ -139,7 +140,7 @@ maxmind_download() {
 }
 
 if [ "${#mm_keys[@]}" -gt 0 ]; then
-  for edition in GeoLite2-ASN GeoLite2-Country; do
+  for edition in GeoLite2-ASN GeoLite2-Country GeoLite2-City; do
     d="$work/maxmind-$edition"; mkdir -p "$d"
     if maxmind_download "$edition" "$d/db.tar.gz" && tar -xzf "$d/db.tar.gz" -C "$d"; then
       install "$edition.mmdb" "$(find "$d" -name "$edition.mmdb" | head -n1)"

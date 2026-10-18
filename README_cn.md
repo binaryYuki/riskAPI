@@ -13,7 +13,7 @@
 
 ### 🌍 地理位置查询 (`/api/v1/info`)
 - **多数据源融合**: 集成7个地理位置数据库
-  - MaxMind GeoLite2 (国家/ASN)
+  - MaxMind GeoLite2 (国家/城市/ASN)
   - IPInfo (国家/ASN)
   - IPLocate (国家/ASN)  
   - 纯真IP数据库 (中国地区高精度)
