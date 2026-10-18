@@ -67,12 +67,9 @@ var (
 // ErrNotFound 美团明确表示没有该 IP 的定位数据（重试也不会变化）
 var ErrNotFound = errors.New("meituan: no location data for ip")
 
-// defaultClient 未传 client 时共用，复用长连接
-var defaultClient = func() *http.Client {
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.MaxIdleConnsPerHost = 8
-	return &http.Client{Timeout: 5 * time.Second, Transport: t}
-}()
+// defaultClient 未传 client 时共用。Transport 留空，请求时使用 http.DefaultTransport
+// （main 已调大其连接池并可能用 otelhttp 包装；包初始化时克隆会丢失这两项）
+var defaultClient = &http.Client{Timeout: 5 * time.Second}
 
 // QueryOptions controls optional behaviour.
 // Enhanced triggers the second detail lookup (lat/lng to rich city record).

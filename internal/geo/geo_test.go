@@ -49,6 +49,26 @@ func TestMaxMindCityFields(t *testing.T) {
 	assert.Contains(t, m, "location")
 }
 
+func TestCoarsePoints(t *testing.T) {
+	loc := func(radius uint64) map[string]any {
+		return map[string]any{"maxmind": map[string]any{"location": map[string]any{
+			"latitude": 34.7732, "longitude": 113.722, "accuracy_radius": radius,
+		}}}
+	}
+	assert.True(t, coarsePoints(loc(1000))[latLng{34.7732, 113.722}])
+	assert.Empty(t, coarsePoints(loc(20)))
+	assert.Empty(t, coarsePoints(map[string]any{}))
+
+	// 真实 City 库解码出的 accuracy_radius 类型须与断言一致
+	db := filepath.Join(providersDir, "maxmind/GeoLite2-City.mmdb")
+	if !fileNonEmpty(db) {
+		t.Skip("GeoLite2-City.mmdb not present")
+	}
+	data, err := newTestService().lookupMMDB(db, net.ParseIP("211.97.6.117"))
+	assert.NoError(t, err)
+	assert.NotEmpty(t, coarsePoints(map[string]any{"maxmind": data}))
+}
+
 func TestIsChina(t *testing.T) {
 	assert.True(t, isChina(map[string]any{"ipinfo": map[string]any{"country": "CN"}}))
 	assert.True(t, isChina(map[string]any{"maxmind": map[string]any{"country": map[string]any{"iso_code": "CN"}}}))

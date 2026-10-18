@@ -28,6 +28,10 @@ var mmdbProviders = []struct {
 	{"maxmind", []string{"maxmind/GeoLite2-Country.mmdb", "maxmind/GeoLite2-City.mmdb", "maxmind/GeoLite2-ASN.mmdb"}},
 }
 
+// maxReverseGeoRadiusKm maxmind 误差半径超过该值时坐标只是国家/大区默认点（如中国为郑州附近、半径 1000km），
+// ip.sb 返回同一坐标时不做美团逆地理编码，避免把默认点解析成看似精确的街区
+const maxReverseGeoRadiusKm = 100
+
 // ipsbRatePerSecond ip.sb 免费接口限制 5 次/秒（按出口 IP 计算，多实例部署时各自限速）
 const ipsbRatePerSecond = 5
 
@@ -102,7 +106,8 @@ func (s *Service) Lookup(ctx context.Context, ipStr string, log *slog.Logger) (r
 		ipsbData, meituanData map[string]any
 		ipsbDone, meituanDone = true, true
 	)
-	wg.Go(func() { ipsbData, ipsbDone = s.queryIPSB(ctx, ipStr, china, log) })
+	coarse := coarsePoints(results)
+	wg.Go(func() { ipsbData, ipsbDone = s.queryIPSB(ctx, ipStr, china, coarse, log) })
 	if china {
 		wg.Go(func() { meituanData, meituanDone = queryMeituan(ctx, ipStr, log) })
 	}
@@ -116,9 +121,9 @@ func (s *Service) Lookup(ctx context.Context, ipStr string, log *slog.Logger) (r
 	return results, ipsbDone && meituanDone
 }
 
-// queryIPSB 查询 ip.sb；reverseGeo 为 true 且结果带经纬度时用美团逆地理编码，放入 "meituan_geo" 字段。
+// queryIPSB 查询 ip.sb；reverseGeo 为 true 且结果带经纬度（不在 coarse 中）时用美团逆地理编码，放入 "meituan_geo" 字段。
 // done=false 表示请求失败（含超时、限速等待超时），结果不完整
-func (s *Service) queryIPSB(ctx context.Context, ip string, reverseGeo bool, log *slog.Logger) (data map[string]any, done bool) {
+func (s *Service) queryIPSB(ctx context.Context, ip string, reverseGeo bool, coarse map[latLng]bool, log *slog.Logger) (data map[string]any, done bool) {
 	data, err := s.ipsb.Query(ctx, ip)
 	if err != nil {
 		log.ErrorContext(ctx, "ipsb lookup failed", "err", err)
@@ -126,7 +131,7 @@ func (s *Service) queryIPSB(ctx context.Context, ip string, reverseGeo bool, log
 	}
 	lat, _ := data["latitude"].(float64)
 	lng, _ := data["longitude"].(float64)
-	if !reverseGeo || (lat == 0 && lng == 0) {
+	if !reverseGeo || (lat == 0 && lng == 0) || coarse[latLng{lat, lng}] {
 		return data, true
 	}
 	g, err := meituan.ReverseGeocode(ctx, nil, lat, lng)
@@ -156,6 +161,21 @@ func queryMeituan(ctx context.Context, ip string, log *slog.Logger) (data map[st
 		return nil, false
 	}
 	return data, true
+}
+
+type latLng struct{ lat, lng float64 }
+
+// coarsePoints 返回本地库中误差半径超过 maxReverseGeoRadiusKm 的坐标
+func coarsePoints(results map[string]any) map[latLng]bool {
+	mm, _ := results["maxmind"].(map[string]any)
+	loc, _ := mm["location"].(map[string]any)
+	lat, ok1 := loc["latitude"].(float64)
+	lng, ok2 := loc["longitude"].(float64)
+	radius, ok3 := loc["accuracy_radius"].(uint64)
+	if !ok1 || !ok2 || !ok3 || radius <= maxReverseGeoRadiusKm {
+		return nil
+	}
+	return map[latLng]bool{{lat, lng}: true}
 }
 
 // isChina 判断结果中是否有任何 provider 显示为中国

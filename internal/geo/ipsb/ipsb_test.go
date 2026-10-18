@@ -54,3 +54,18 @@ func TestQueryRateLimited(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, int32(3), hits.Load())
 }
+
+type wrappedTransport struct{ http.RoundTripper }
+
+// 开启 tracing 时 http.DefaultTransport 被 otelhttp 包装，不再是 *http.Transport
+func TestNewClientWithWrappedDefaultTransport(t *testing.T) {
+	var hits atomic.Int32
+	fakeServer(t, &hits)
+	old := http.DefaultTransport
+	http.DefaultTransport = wrappedTransport{old}
+	t.Cleanup(func() { http.DefaultTransport = old })
+
+	_, err := NewClient(0).Query(context.Background(), "1.1.1.1")
+	assert.NoError(t, err)
+	assert.Equal(t, int32(1), hits.Load())
+}
