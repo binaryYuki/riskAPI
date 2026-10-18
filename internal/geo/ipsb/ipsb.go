@@ -38,7 +38,7 @@ const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 // baseURL 测试时替换为 httptest 地址
 var baseURL = "https://api.ip.sb/geoip"
 
-// Client ip.sb 查询客户端，可并发使用：复用长连接，并按 perSecond 均匀限速（ip.sb 限制 5 次/秒）
+// Client ip.sb 查询客户端，可并发使用：经 http.DefaultTransport 复用长连接，并按 perSecond 均匀限速（ip.sb 限制 5 次/秒）
 type Client struct {
 	http    *http.Client
 	limiter *rate.Limiter
@@ -46,14 +46,14 @@ type Client struct {
 
 // NewClient perSecond <= 0 表示不限速
 func NewClient(perSecond float64) *Client {
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.MaxIdleConnsPerHost = 8 // 默认仅 2，并发查询时会频繁新建 TLS 连接
 	limit := rate.Inf
 	if perSecond > 0 {
 		limit = rate.Limit(perSecond)
 	}
 	return &Client{
-		http: &http.Client{Timeout: 5 * time.Second, Transport: t},
+		// Transport 留空即使用 http.DefaultTransport：main 已调大其连接池，开启 tracing 时还会被 otelhttp 包装，
+		// 不能断言为 *http.Transport
+		http: &http.Client{Timeout: 5 * time.Second},
 		// burst=1：请求间隔至少 1/perSecond，任意 1 秒窗口内都不会超过上限
 		limiter: rate.NewLimiter(limit, 1),
 	}
