@@ -16,14 +16,16 @@ import (
 	"risky_ip_filter/internal/geo/qqwry"
 )
 
-// mmdbProviders 各 provider 的 MMDB 文件（相对 providers 目录；country 在前、asn 在后，合并时后者覆盖同名字段）
+// mmdbProviders 各 provider 的 MMDB 文件（相对 providers 目录；按顺序深度合并，后者覆盖同名字段）。
+// maxmind 的 City 库包含 Country 库的全部字段并增加 city / subdivisions / location / postal；
+// 保留 Country 库，City 库缺失时仍能给出国家
 var mmdbProviders = []struct {
 	name string
 	dbs  []string
 }{
 	{"ipinfo", []string{"ipinfo/ipinfo-country.mmdb", "ipinfo/ipinfo-asn.mmdb"}},
 	{"iplocate", []string{"iplocate/iplocate-country.mmdb", "iplocate/iplocate-asn.mmdb"}},
-	{"maxmind", []string{"maxmind/GeoLite2-Country.mmdb", "maxmind/GeoLite2-ASN.mmdb"}},
+	{"maxmind", []string{"maxmind/GeoLite2-Country.mmdb", "maxmind/GeoLite2-City.mmdb", "maxmind/GeoLite2-ASN.mmdb"}},
 }
 
 // ipsbRatePerSecond ip.sb 免费接口限制 5 次/秒（按出口 IP 计算，多实例部署时各自限速）
