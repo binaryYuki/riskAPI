@@ -1,5 +1,5 @@
 // Package geo 聚合多个 IP 地理位置数据源：本地 MMDB（ipinfo / iplocate / maxmind）、
-// 纯真库，以及外部 API：ip.sb 总是查询（有经纬度时再用美团逆地理编码），中国 IP 另查美团 IP 定位。
+// 纯真库，以及外部 API：ip.sb 总是查询；中国 IP 另查美团 IP 定位，并用美团把 ip.sb 经纬度逆地理编码。
 package geo
 
 import (
@@ -93,14 +93,15 @@ func (s *Service) Lookup(ctx context.Context, ipStr string, log *slog.Logger) (r
 	ctx, cancel := context.WithTimeout(ctx, s.lookupTimeout)
 	defer cancel()
 
-	// ip.sb 总是查询；其它 provider 判定为中国(CN) 时并发查询美团 IP 定位
+	// ip.sb 总是查询；其它 provider 判定为中国(CN) 时才使用美团（IP 定位与逆地理编码），海外 IP 不查美团
+	china := isChina(results)
 	var (
 		wg                    sync.WaitGroup
 		ipsbData, meituanData map[string]any
 		ipsbDone, meituanDone = true, true
 	)
-	wg.Go(func() { ipsbData, ipsbDone = s.queryIPSB(ctx, ipStr, log) })
-	if isChina(results) {
+	wg.Go(func() { ipsbData, ipsbDone = s.queryIPSB(ctx, ipStr, china, log) })
+	if china {
 		wg.Go(func() { meituanData, meituanDone = queryMeituan(ctx, ipStr, log) })
 	}
 	wg.Wait()
@@ -113,9 +114,9 @@ func (s *Service) Lookup(ctx context.Context, ipStr string, log *slog.Logger) (r
 	return results, ipsbDone && meituanDone
 }
 
-// queryIPSB 查询 ip.sb；结果带经纬度时用美团逆地理编码，放入 "meituan_geo" 字段。
+// queryIPSB 查询 ip.sb；reverseGeo 为 true 且结果带经纬度时用美团逆地理编码，放入 "meituan_geo" 字段。
 // done=false 表示请求失败（含超时、限速等待超时），结果不完整
-func (s *Service) queryIPSB(ctx context.Context, ip string, log *slog.Logger) (data map[string]any, done bool) {
+func (s *Service) queryIPSB(ctx context.Context, ip string, reverseGeo bool, log *slog.Logger) (data map[string]any, done bool) {
 	data, err := s.ipsb.Query(ctx, ip)
 	if err != nil {
 		log.ErrorContext(ctx, "ipsb lookup failed", "err", err)
@@ -123,7 +124,7 @@ func (s *Service) queryIPSB(ctx context.Context, ip string, log *slog.Logger) (d
 	}
 	lat, _ := data["latitude"].(float64)
 	lng, _ := data["longitude"].(float64)
-	if lat == 0 && lng == 0 {
+	if !reverseGeo || (lat == 0 && lng == 0) {
 		return data, true
 	}
 	g, err := meituan.ReverseGeocode(ctx, nil, lat, lng)
