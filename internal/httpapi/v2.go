@@ -61,9 +61,12 @@ func (s *Server) parseTokenRequest(c *gin.Context) (tokenRequest, bool) {
 		handleError(c, http.StatusServiceUnavailable, "token signing is not configured")
 	case !s.audiences.allows(aud):
 		handleError(c, http.StatusForbidden, "aud is not allowed")
-	case !originMatchesAudience(c.GetHeader("Origin"), aud):
-		// 浏览器跨域请求的 Origin 无法被页面脚本伪造：别的站点不能替本站申请令牌
-		handleError(c, http.StatusForbidden, "aud does not match Origin")
+	case c.GetHeader("Sec-Fetch-Mode") == "navigate":
+		// 地址栏直接打开、链接跳转、iframe 均为导航请求，不是接入站点脚本发起的 fetch
+		handleError(c, http.StatusForbidden, "token requests must be made by fetch/XHR, not navigation")
+	case !callerMatchesAudience(c.GetHeader("Origin"), c.GetHeader("Referer"), aud):
+		// 浏览器的 Origin/Referer 无法被页面脚本伪造：别的站点或直接打开 URL 都不能替本站申请令牌
+		handleError(c, http.StatusForbidden, "aud does not match Origin/Referer")
 	default:
 		return tokenRequest{want: true, aud: aud, nonce: nonce}, true
 	}
@@ -212,14 +215,25 @@ func isValidNonce(nonce string) bool {
 	return true
 }
 
-// originMatchesAudience 有 Origin 时其主机名必须等于 aud；无 Origin（服务端直接调用）不限制
-func originMatchesAudience(origin, aud string) bool {
-	if origin == "" {
-		return true
-	}
-	u, err := url.Parse(origin)
-	if err != nil {
+// callerMatchesAudience Origin 与 Referer 至少要有一个，且出现的每一个主机名都必须等于 aud。
+// 同源 GET 不带 Origin、Referrer-Policy: no-referrer 时不带 Referer，因此任一存在即可
+func callerMatchesAudience(origin, referer, aud string) bool {
+	if origin == "" && referer == "" {
 		return false
 	}
-	return strings.EqualFold(u.Hostname(), aud)
+	for _, v := range []string{origin, referer} {
+		if v != "" && !urlHostIs(v, aud) {
+			return false
+		}
+	}
+	return true
+}
+
+// urlHostIs v 必须是 http(s) URL 且主机名等于 host；"null" 等不透明来源一律不匹配
+func urlHostIs(v, host string) bool {
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return false
+	}
+	return strings.EqualFold(u.Hostname(), host)
 }

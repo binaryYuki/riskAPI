@@ -193,7 +193,12 @@ The signature covers the ASCII bytes of the first segment (both segments unpadde
 The verifier must check: signature (key chosen by `kid`), `exp`, `aud` equals its own host, `nonce` equals the one it issued and has not been used, and `ip` matches the visitor IP it sees (compare IPv6 by /64).
 
 - `aud` and `nonce` are optional together: without both, no token is issued. Only one of them → 400. `aud` must be a bare host name; `nonce` must be 8–128 chars of `[A-Za-z0-9._~-]`.
-- Signing not configured → 503; `aud` outside `RISK_TOKEN_AUDIENCES` → 403; an `Origin` header whose host differs from `aud` → 403.
+- Signing not configured → 503; `aud` outside `RISK_TOKEN_AUDIENCES` → 403; 403 also when:
+  - Neither `Origin` nor `Referer` is present (e.g. curl or a server-side call).
+  - The host of `Origin` or `Referer` differs from `aud`; when both are sent, both must match.
+  - `Sec-Fetch-Mode: navigate`, meaning the URL was opened in the address bar, followed as a link, or loaded in an iframe.
+
+  Tokens can only be requested by `fetch`/XHR from the integrating site's pages.
 - v2 and `/.well-known/risk-keys.json` send `Access-Control-Allow-Origin: *` without credentials; v1 CORS is unchanged. The key set is cacheable for 5 minutes.
 - Key rotation: switch `RISK_SIGNING_KEY` / `RISK_SIGNING_KID` to the new key and list the old public key in `RISK_PUBLISHED_KEYS` for at least the token TTL plus the key-set cache time.
 

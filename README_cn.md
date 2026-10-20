@@ -190,7 +190,12 @@ GET /.well-known/risk-keys.json
 接入方需校验：签名（按 `kid` 选公钥）、`exp`、`aud` 等于本站域名、`nonce` 是本站下发且未使用过的、`ip` 与本站看到的访客 IP 一致（IPv6 按 /64 比较）。
 
 - `aud` 与 `nonce` 要么都带、要么都不带：都不带时不签发令牌；只带其一返回 400。`aud` 必须是纯域名；`nonce` 为 8～128 位 `[A-Za-z0-9._~-]`。
-- 未配置签名返回 503；`aud` 不在 `RISK_TOKEN_AUDIENCES` 中返回 403；请求带 `Origin` 且其主机名与 `aud` 不一致返回 403。
+- 未配置签名返回 503；`aud` 不在 `RISK_TOKEN_AUDIENCES` 中返回 403；以下情况返回 403：
+  - 既没有 `Origin` 也没有 `Referer`（如 curl 或服务端直接调用）。
+  - `Origin` 或 `Referer` 的主机名与 `aud` 不一致，两者都带时都要一致。
+  - `Sec-Fetch-Mode: navigate`，即在浏览器地址栏直接打开、点链接跳转或用 iframe 加载。
+
+  令牌只能由接入站点页面里的 `fetch`/XHR 申请。
 - v2 与 `/.well-known/risk-keys.json` 返回 `Access-Control-Allow-Origin: *`，不带凭据；v1 的 CORS 不变。公钥集合可缓存 5 分钟。
 - 轮换密钥：把 `RISK_SIGNING_KEY` / `RISK_SIGNING_KID` 换成新密钥，旧公钥写入 `RISK_PUBLISHED_KEYS`，至少保留令牌有效期 + 公钥缓存时间。
 

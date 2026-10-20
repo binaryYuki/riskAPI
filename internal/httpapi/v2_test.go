@@ -78,32 +78,47 @@ func TestCheckRequestIPV2WithoutTokenParams(t *testing.T) {
 func TestV2TokenParamValidation(t *testing.T) {
 	signed := newTestEnv(t, withSigning("gdue-ca.paperee.guru"))
 	unsigned := newTestEnv(t)
+	const (
+		aud     = "gdue-ca.paperee.guru"
+		page    = "https://gdue-ca.paperee.guru"
+		evil    = "https://evil.example"
+		goodQry = "aud=" + aud + "&nonce=" + testNonce
+	)
 	tests := []struct {
-		name   string
-		env    *testEnv
-		query  string
-		origin string
-		want   int
+		name    string
+		env     *testEnv
+		query   string
+		headers map[string]string
+		want    int
 	}{
-		{"aud only", signed, "aud=gdue-ca.paperee.guru", "", http.StatusBadRequest},
-		{"nonce only", signed, "nonce=" + testNonce, "", http.StatusBadRequest},
-		{"aud with scheme", signed, "aud=https://gdue-ca.paperee.guru&nonce=" + testNonce, "", http.StatusBadRequest},
-		{"aud with port", signed, "aud=gdue-ca.paperee.guru:443&nonce=" + testNonce, "", http.StatusBadRequest},
-		{"short nonce", signed, "aud=gdue-ca.paperee.guru&nonce=abc", "", http.StatusBadRequest},
-		{"nonce bad chars", signed, "aud=gdue-ca.paperee.guru&nonce=abc%22def%3Cghi", "", http.StatusBadRequest},
-		{"not configured", unsigned, "aud=gdue-ca.paperee.guru&nonce=" + testNonce, "", http.StatusServiceUnavailable},
-		{"aud not allowed", signed, "aud=evil.example&nonce=" + testNonce, "https://evil.example", http.StatusForbidden},
-		{"origin mismatch", signed, "aud=gdue-ca.paperee.guru&nonce=" + testNonce, "https://evil.example", http.StatusForbidden},
-		{"null origin", signed, "aud=gdue-ca.paperee.guru&nonce=" + testNonce, "null", http.StatusForbidden},
-		{"aud case-insensitive", signed, "aud=GDUE-CA.paperee.guru&nonce=" + testNonce, "https://gdue-ca.paperee.guru", http.StatusOK},
-		{"server-side call", signed, "aud=gdue-ca.paperee.guru&nonce=" + testNonce, "", http.StatusOK},
+		{"aud only", signed, "aud=" + aud, nil, http.StatusBadRequest},
+		{"nonce only", signed, "nonce=" + testNonce, nil, http.StatusBadRequest},
+		{"aud with scheme", signed, "aud=https://" + aud + "&nonce=" + testNonce, nil, http.StatusBadRequest},
+		{"aud with port", signed, "aud=" + aud + ":443&nonce=" + testNonce, nil, http.StatusBadRequest},
+		{"short nonce", signed, "aud=" + aud + "&nonce=abc", nil, http.StatusBadRequest},
+		{"nonce bad chars", signed, "aud=" + aud + "&nonce=abc%22def%3Cghi", nil, http.StatusBadRequest},
+		{"not configured", unsigned, goodQry, map[string]string{"Origin": page}, http.StatusServiceUnavailable},
+		{"aud not allowed", signed, "aud=evil.example&nonce=" + testNonce, map[string]string{"Origin": evil}, http.StatusForbidden},
+		{"origin mismatch", signed, goodQry, map[string]string{"Origin": evil}, http.StatusForbidden},
+		{"null origin", signed, goodQry, map[string]string{"Origin": "null"}, http.StatusForbidden},
+		{"aud case-insensitive", signed, "aud=GDUE-CA.paperee.guru&nonce=" + testNonce, map[string]string{"Origin": page}, http.StatusOK},
+		{"no origin nor referer", signed, goodQry, nil, http.StatusForbidden},
+		{"referer only", signed, goodQry, map[string]string{"Referer": page + "/login?x=1"}, http.StatusOK},
+		{"referer mismatch", signed, goodQry, map[string]string{"Referer": evil + "/"}, http.StatusForbidden},
+		{"referer lookalike host", signed, goodQry, map[string]string{"Referer": "https://" + aud + ".evil.example/"}, http.StatusForbidden},
+		{"referer non-http scheme", signed, goodQry, map[string]string{"Referer": "file://" + aud + "/"}, http.StatusForbidden},
+		{"origin ok referer forged", signed, goodQry, map[string]string{"Origin": page, "Referer": evil + "/"}, http.StatusForbidden},
+		{"origin and referer", signed, goodQry, map[string]string{"Origin": page, "Referer": page + "/"}, http.StatusOK},
+		{"cors fetch", signed, goodQry, map[string]string{"Origin": page, "Sec-Fetch-Mode": "cors"}, http.StatusOK},
+		// 地址栏直接打开 / 链接跳转：即便伪造了 Referer 也拒绝
+		{"browser navigation", signed, goodQry, map[string]string{"Referer": page + "/", "Sec-Fetch-Mode": "navigate"}, http.StatusForbidden},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// 私网对端：/api/v2/info 不触发外部地理位置查询
 			opts := []reqOpt{withRemote("192.168.1.5:1")}
-			if tt.origin != "" {
-				opts = append(opts, withHeader("Origin", tt.origin))
+			for k, v := range tt.headers {
+				opts = append(opts, withHeader(k, v))
 			}
 			for _, path := range []string{"/api/v2/ip", "/api/v2/info"} {
 				w := tt.env.do(http.MethodGet, path+"?"+tt.query, opts...)
@@ -140,7 +155,8 @@ func TestAudiencePolicy(t *testing.T) {
 func TestIPInfoV2(t *testing.T) {
 	env := newTestEnv(t, withSigning())
 	// 私网地址不触发外部查询
-	w := env.do(http.MethodGet, "/api/v2/info?aud=gdue-ca.paperee.guru&nonce="+testNonce, withRemote("192.168.1.5:1"))
+	w := env.do(http.MethodGet, "/api/v2/info?aud=gdue-ca.paperee.guru&nonce="+testNonce,
+		withRemote("192.168.1.5:1"), withHeader("Referer", "https://gdue-ca.paperee.guru/login"))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	var resp SignedInfoResponse
