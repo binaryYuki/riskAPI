@@ -14,7 +14,7 @@ import (
 const providersDir = "../../providers"
 
 func newTestService() *Service {
-	return New(providersDir, nil, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(providersDir, nil, nil, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func TestMMDBReaderIsReused(t *testing.T) {

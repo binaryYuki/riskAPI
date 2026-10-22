@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -31,13 +32,23 @@ type Deps struct {
 	Lists     *netlists.Lists
 	Geo       *geo.Service
 	InfoCache *cache.Cache
-	Trap      *honeytrap.Trap
+	// SharedInfoCache 跨实例共享的 info 二级缓存（CLUSTER_MODE=1）；为 nil 时只用本实例缓存
+	SharedInfoCache SharedCache
+	// Broadcaster 向其它实例广播管理操作（CLUSTER_MODE=1）；为 nil 时管理操作只作用于本实例。
+	// 收到的消息由调用方交给 Server.HandleClusterMessage
+	Broadcaster Broadcaster
+	Trap        *honeytrap.Trap
 	// ParseClient 转发 /api/v1/parse 使用的 HTTP 客户端；为 nil 时使用 30s 超时的默认客户端
 	ParseClient *http.Client
 	// TracerProvider 非 nil 时为入站请求创建 span（OPENTELEMETRY=1）
 	TracerProvider trace.TracerProvider
 	// Signer 为 /api/v2 结果签名；为 nil 时 v2 不签发令牌
 	Signer *risktoken.Signer
+}
+
+// Broadcaster 向集群内其它实例广播消息
+type Broadcaster interface {
+	Publish(ctx context.Context, payload []byte) error
 }
 
 // Server 持有全部依赖，处理函数为其方法
@@ -49,7 +60,10 @@ type Server struct {
 	lists     *netlists.Lists
 	geo       *geo.Service
 	infoCache *cache.Cache
-	trap      *honeytrap.Trap
+	shared    SharedCache
+	// broadcaster 为 nil 时不广播
+	broadcaster Broadcaster
+	trap        *honeytrap.Trap
 
 	trustedProxies []netip.Prefix
 	parseClient    *http.Client
@@ -69,6 +83,8 @@ func New(d Deps) *Server {
 		lists:          d.Lists,
 		geo:            d.Geo,
 		infoCache:      d.InfoCache,
+		shared:         d.SharedInfoCache,
+		broadcaster:    d.Broadcaster,
 		trap:           d.Trap,
 		trustedProxies: parsePrefixes(d.Config.TrustedProxies, d.Log),
 		parseClient:    d.ParseClient,

@@ -39,6 +39,15 @@ type Config struct {
 	InfoPartialCacheTTL time.Duration // 外部 API 失败（结果不完整）时的缓存时间
 	InfoLookupTimeout   time.Duration // 外部 API 查询超时
 
+	IPSBRatePerSecond         float64 // IPSB_RATE_PER_SEC：ip.sb 请求速率上限；集群模式下为全部实例合计，否则为每个实例，<=0 不限速
+	IPSBFallbackRatePerSecond float64 // IPSB_FALLBACK_RATE_PER_SEC：集群模式下 Redis 暂时不可用时每个实例的速率，默认同 IPSB_RATE_PER_SEC
+
+	// CLUSTER_MODE=1：多副本部署。通过 REDIS_URL 指定的 Redis/Valkey 共享风险数据快照（每个周期只由一个实例抓取）、
+	// info 缓存与 ip.sb 限速，并用 pub/sub 把管理操作广播到所有实例。未开启时各实例独立运行（单机部署），不连接 Redis
+	ClusterMode    bool
+	RedisURL       string // REDIS_URL：redis:// 或 rediss://，CLUSTER_MODE=1 时必填
+	RedisKeyPrefix string // REDIS_KEY_PREFIX：键前缀，多个部署共用同一 Redis 时用于隔离
+
 	FeedUpdateInterval time.Duration
 	FeedFetch          feeds.FetchConfig
 	Feeds              []feeds.Feed
@@ -78,6 +87,7 @@ var DefaultTrustedProxies = []string{
 // Load 读取环境变量并填充默认值
 func Load() Config {
 	logLevel := envString("LOG_LEVEL", "info")
+	ipsbRate := envFloat("IPSB_RATE_PER_SEC", 5)
 	return Config{
 		Addr:            envString("LISTEN_ADDR", ":8080"),
 		ShutdownTimeout: 15 * time.Second,
@@ -107,6 +117,14 @@ func Load() Config {
 		InfoCacheTTL:        time.Hour,
 		InfoPartialCacheTTL: time.Minute,
 		InfoLookupTimeout:   1500 * time.Millisecond,
+
+		// ip.sb 免费接口按出口 IP 限制 5 次/秒
+		IPSBRatePerSecond:         ipsbRate,
+		IPSBFallbackRatePerSecond: envFloat("IPSB_FALLBACK_RATE_PER_SEC", ipsbRate),
+
+		ClusterMode:    envBool("CLUSTER_MODE", false),
+		RedisURL:       envString("REDIS_URL", ""),
+		RedisKeyPrefix: envString("REDIS_KEY_PREFIX", "riskapi:"),
 
 		FeedUpdateInterval: time.Hour,
 		FeedFetch: feeds.FetchConfig{

@@ -44,6 +44,18 @@ func (s *Stats) reset() {
 	s.lastUpdateTs.Store(time.Now().Unix())
 }
 
+// restore 用共享快照中抓取方的统计覆盖本实例统计（本实例未抓取时 /metrics 仍能反映数据源状况）
+func (s *Stats) restore(v StatsSnapshot) {
+	s.totalLines.Store(int64(v.TotalLines))
+	s.parsedIPs.Store(int64(v.ParsedIPs))
+	s.parsedCIDRs.Store(int64(v.ParsedCIDRs))
+	s.fetchAttempts.Store(int64(v.FetchAttempts))
+	s.fetchSuccess.Store(int64(v.FetchSuccess))
+	s.fetchFailures.Store(int64(v.FetchFailures))
+	s.specialRanges.Store(int64(v.SpecialRanges))
+	s.lastUpdateTs.Store(v.LastUpdateTs)
+}
+
 // Snapshot 返回当前统计
 func (s *Stats) Snapshot() StatsSnapshot {
 	return StatsSnapshot{
