@@ -121,6 +121,10 @@ docker-compose up -d
 | `PARSE_WORKER_BASE` | Upstream parse worker base URL | `https://xhs-proxy.tzpro.workers.dev` |
 | `PARSE_RATE_LIMIT_PER_MIN` | Per-client-IP limit for `/api/v1/parse` (`0` disables) | `30` |
 | `INFO_CACHE_MAX_ENTRIES` | Max `/api/v1/info` cache entries (1h TTL) | `20000` |
+| `REDIS_URL` | Optional Redis/Valkey URL (`redis://` or `rediss://`). With multiple replicas it shares the risk list snapshot (feeds are fetched once per hour cluster-wide), a second-level `/api/v1/info` cache and the ip.sb rate limit; when unset every instance runs independently. See [Multi-replica deployment](#multi-replica-deployment-k8s--k3s) | _(unset)_ |
+| `REDIS_KEY_PREFIX` | Redis key prefix, to isolate deployments sharing one Redis | `riskapi:` |
+| `IPSB_RATE_PER_SEC` | ip.sb request rate limit (the free API allows 5/s per egress IP); cluster-wide total when `REDIS_URL` is set, otherwise per instance; `0` disables | `5` |
+| `IPSB_FALLBACK_RATE_PER_SEC` | Per-instance ip.sb rate while Redis is unreachable (suggested: `IPSB_RATE_PER_SEC / replicas`) | same as `IPSB_RATE_PER_SEC` |
 | `RISK_SIGNING_KEY` | Ed25519 private key for `/api/v2` tokens: PEM (PKCS#8) or base64 of the 32-byte seed / PKCS#8 DER (`openssl genpkey -algorithm ed25519 -outform DER \| base64`). Startup fails if it is invalid | _(unset: v2 issues no tokens)_ |
 | `RISK_SIGNING_KID` | Key id written into tokens and `/.well-known/risk-keys.json` | public-key fingerprint |
 | `RISK_PUBLISHED_KEYS` | Old public keys to keep publishing during rotation, `kid=base64` comma-separated | _(unset)_ |
@@ -405,24 +409,83 @@ POST /api/cache/flush/{method}/{range}
 - **Network**: Recommended CDN and load balancer configuration
 - **Monitoring**: Integrate Prometheus/Grafana monitoring
 
-### High Availability Deployment
+### Multi-replica deployment (k8s / k3s)
+Replicas usually share one egress IP. If every replica fetches the 30+ risk feeds and calls ip.sb / Meituan on its own, upstream traffic multiplies and gets rate limited.
+With `REDIS_URL` set:
+- **Risk feeds**: each cycle exactly one instance fetches (Redis lock) and publishes a gzip snapshot (~2–3 MB); the others check every 30s and load it. New pods load the existing snapshot on startup, so rolling updates no longer refetch everything.
+- **`/api/v1/info`**: a shared Redis cache sits behind each instance's in-memory cache, so an IP is looked up externally once per cluster.
+- **ip.sb rate limit**: all instances together stay under `IPSB_RATE_PER_SEC`.
+
+Redis is an optimisation, not a dependency: being unreachable at startup does not block startup; errors at runtime fall back to local state within 5s (local cache, local rate limit, per-instance fetching), and Redis is used again once it recovers.
+For a single host (e.g. `compose.yaml`) simply leave `REDIS_URL` unset; behaviour is unchanged.
+
+Admin endpoints: `/api/cache/flush/info/*` also clears the shared cache, but other instances keep their in-memory entries until they expire (up to 1h); `flush/risk` and `flush/all` only affect the instance that handled the request.
+
 ```yaml
-# docker-compose.yml example
-version: '3.8'
-services:
-  riskapi:
-    image: riskapi:latest
-    deploy:
-      replicas: 3
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-    ports:
-      - "8080-8082:8080"
-    environment:
-      - HONEYTRAP_ENABLED=true
-    restart: unless-stopped
+# Valkey only holds rebuildable cache and snapshots; no persistence needed
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: valkey}
+  template:
+    metadata:
+      labels: {app: valkey}
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:8.1-alpine
+          # volatile-lru: under memory pressure only TTL-bound info cache is evicted, never the risk list snapshot
+          args: ["--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+          ports:
+            - containerPort: 6379
+          resources:
+            limits: {memory: 320Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+spec:
+  selector: {app: valkey}
+  ports:
+    - port: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: riskapi
+spec:
+  replicas: 4
+  selector:
+    matchLabels: {app: riskapi}
+  template:
+    metadata:
+      labels: {app: riskapi}
+    spec:
+      terminationGracePeriodSeconds: 20 # must exceed the 15s in-process graceful shutdown timeout
+      containers:
+        - name: riskapi
+          image: <dockerhub-user>/risk-api:latest
+          env:
+            - name: REDIS_URL
+              value: redis://valkey:6379/0
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - containerPort: 8080
+          # /api/ready returns 503 until risk lists load; with a snapshot present new pods are ready in seconds
+          readinessProbe:
+            httpGet: {path: /api/ready, port: 8080}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /api/status, port: 8080}
+            periodSeconds: 30
+          resources:
+            limits: {memory: 1Gi}
 ```
 
 ## Development Guide
@@ -437,6 +500,7 @@ services:
 │   ├── ipset/           # Longest-prefix-match IP table (bart), bogon checks
 │   ├── netlists/        # CDN / IDC (cloud provider) lists
 │   ├── geo/             # Geolocation aggregation (MMDB, QQWry, Meituan, IP.SB)
+│   ├── shared/          # Optional Redis/Valkey: shared snapshot, cache and rate limit across replicas
 │   ├── honeytrap/       # Honeypot middleware and decoy routes
 │   └── cache/           # TTL + size-bounded cache
 ├── providers/           # Geolocation databases (MMDB, qqwry.dat; updated daily by CI)

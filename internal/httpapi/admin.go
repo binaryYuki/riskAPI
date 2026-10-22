@@ -16,6 +16,8 @@ import (
 //	all:  忽略 range，清空 info 缓存与风险列表，并立即重新加载 CDN/IDC 列表
 //	info: range=all 清空全部 info 缓存；否则视为 IP，删除对应条目
 //	risk: range=all 清空风险列表；否则按 IP 或 CIDR 删除单条
+//
+// 配置共享缓存时 info 同时清理共享缓存（其它实例的本地缓存仍保留至过期）；风险列表与 CDN/IDC 只作用于处理该请求的实例
 func (s *Server) flush(c *gin.Context) {
 	method := c.Param("method")
 	rng := strings.TrimPrefix(c.Param("range"), "/") // 通配符参数带前导斜杠
@@ -24,6 +26,7 @@ func (s *Server) flush(c *gin.Context) {
 	switch method {
 	case "all":
 		s.infoCache.Flush()
+		s.flushSharedInfo(c, result)
 		s.risk.Clear()
 		s.lists.Reload()
 		result["flushed_info_cache"] = true
@@ -33,12 +36,18 @@ func (s *Server) flush(c *gin.Context) {
 	case "info":
 		if rng == "all" {
 			s.infoCache.DeletePrefix(infoCachePrefix)
+			s.flushSharedInfo(c, result)
 			result["flushed_info_all"] = true
 		} else {
 			if decoded, err := url.PathUnescape(rng); err == nil {
 				rng = decoded
 			}
 			s.infoCache.Delete(infoCachePrefix + rng)
+			if s.shared != nil {
+				if err := s.shared.Delete(c.Request.Context(), rng); err != nil {
+					result["shared_error"] = err.Error()
+				}
+			}
 			result["flushed_info_key"] = rng
 		}
 
@@ -59,6 +68,18 @@ func (s *Server) flush(c *gin.Context) {
 		return
 	}
 	c.IndentedJSON(http.StatusOK, Response{Status: "ok", Message: result})
+}
+
+// flushSharedInfo 清空共享 info 缓存，结果写入 result
+func (s *Server) flushSharedInfo(c *gin.Context, result gin.H) {
+	if s.shared == nil {
+		return
+	}
+	n, err := s.shared.Flush(c.Request.Context())
+	result["flushed_shared_info"] = n
+	if err != nil {
+		result["shared_error"] = err.Error()
+	}
 }
 
 // flushIndex GET /api/cache/flush 返回可用的缓存刷新端点说明（不列出 method=all）

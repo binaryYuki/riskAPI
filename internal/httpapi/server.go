@@ -31,7 +31,9 @@ type Deps struct {
 	Lists     *netlists.Lists
 	Geo       *geo.Service
 	InfoCache *cache.Cache
-	Trap      *honeytrap.Trap
+	// SharedInfoCache 跨实例共享的 info 二级缓存（配置 REDIS_URL 时）；为 nil 时只用本实例缓存
+	SharedInfoCache SharedCache
+	Trap            *honeytrap.Trap
 	// ParseClient 转发 /api/v1/parse 使用的 HTTP 客户端；为 nil 时使用 30s 超时的默认客户端
 	ParseClient *http.Client
 	// TracerProvider 非 nil 时为入站请求创建 span（OPENTELEMETRY=1）
@@ -49,6 +51,7 @@ type Server struct {
 	lists     *netlists.Lists
 	geo       *geo.Service
 	infoCache *cache.Cache
+	shared    SharedCache
 	trap      *honeytrap.Trap
 
 	trustedProxies []netip.Prefix
@@ -69,6 +72,7 @@ func New(d Deps) *Server {
 		lists:          d.Lists,
 		geo:            d.Geo,
 		infoCache:      d.InfoCache,
+		shared:         d.SharedInfoCache,
 		trap:           d.Trap,
 		trustedProxies: parsePrefixes(d.Config.TrustedProxies, d.Log),
 		parseClient:    d.ParseClient,

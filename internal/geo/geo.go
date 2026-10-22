@@ -32,9 +32,6 @@ var mmdbProviders = []struct {
 // ip.sb 返回同一坐标时不做美团逆地理编码，避免把默认点解析成看似精确的街区
 const maxReverseGeoRadiusKm = 100
 
-// ipsbRatePerSecond ip.sb 免费接口限制 5 次/秒（按出口 IP 计算，多实例部署时各自限速）
-const ipsbRatePerSecond = 5
-
 // Service 地理位置查询服务，可并发使用
 type Service struct {
 	providersDir  string
@@ -45,12 +42,13 @@ type Service struct {
 	readers       sync.Map // MMDB 路径 → *maxminddb.Reader
 }
 
-// New 创建查询服务；qq 可为 nil（纯真库加载失败时跳过）
-func New(providersDir string, qq *qqwry.DB, lookupTimeout time.Duration, log *slog.Logger) *Service {
+// New 创建查询服务；qq 可为 nil（纯真库加载失败时跳过）。
+// ipsbLimiter 为 ip.sb 请求限速（免费接口按出口 IP 限制 5 次/秒，多副本共用出口时应使用共享限速器），为 nil 时不限速
+func New(providersDir string, qq *qqwry.DB, ipsbLimiter ipsb.Limiter, lookupTimeout time.Duration, log *slog.Logger) *Service {
 	return &Service{
 		providersDir:  providersDir,
 		qq:            qq,
-		ipsb:          ipsb.NewClient(ipsbRatePerSecond),
+		ipsb:          ipsb.NewClientWithLimiter(ipsbLimiter),
 		lookupTimeout: lookupTimeout,
 		log:           log,
 	}

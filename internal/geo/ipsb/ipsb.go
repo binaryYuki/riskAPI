@@ -38,24 +38,33 @@ const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 // baseURL 测试时替换为 httptest 地址
 var baseURL = "https://api.ip.sb/geoip"
 
-// Client ip.sb 查询客户端，可并发使用：经 http.DefaultTransport 复用长连接，并按 perSecond 均匀限速（ip.sb 限制 5 次/秒）
-type Client struct {
-	http    *http.Client
-	limiter *rate.Limiter
+// Limiter 限速器：Wait 阻塞到获得配额，所需等待超过 ctx 截止时间时返回错误。*rate.Limiter 即满足该接口
+type Limiter interface {
+	Wait(ctx context.Context) error
 }
 
-// NewClient perSecond <= 0 表示不限速
+// Client ip.sb 查询客户端，可并发使用：经 http.DefaultTransport 复用长连接，并按 limiter 限速（ip.sb 限制 5 次/秒）
+type Client struct {
+	http    *http.Client
+	limiter Limiter // 为 nil 时不限速
+}
+
+// NewClient 按 perSecond 在本实例内均匀限速；perSecond <= 0 表示不限速
 func NewClient(perSecond float64) *Client {
-	limit := rate.Inf
-	if perSecond > 0 {
-		limit = rate.Limit(perSecond)
+	if perSecond <= 0 {
+		return NewClientWithLimiter(nil)
 	}
+	// burst=1：请求间隔至少 1/perSecond，任意 1 秒窗口内都不会超过上限
+	return NewClientWithLimiter(rate.NewLimiter(rate.Limit(perSecond), 1))
+}
+
+// NewClientWithLimiter 使用指定限速器（如多实例共享的限速器）；limiter 为 nil 表示不限速
+func NewClientWithLimiter(limiter Limiter) *Client {
 	return &Client{
 		// Transport 留空即使用 http.DefaultTransport：main 已调大其连接池，开启 tracing 时还会被 otelhttp 包装，
 		// 不能断言为 *http.Transport
-		http: &http.Client{Timeout: 5 * time.Second},
-		// burst=1：请求间隔至少 1/perSecond，任意 1 秒窗口内都不会超过上限
-		limiter: rate.NewLimiter(limit, 1),
+		http:    &http.Client{Timeout: 5 * time.Second},
+		limiter: limiter,
 	}
 }
 
@@ -66,8 +75,10 @@ func (c *Client) Query(ctx context.Context, ip string) (map[string]interface{}, 
 	if net.ParseIP(ip) == nil {
 		return nil, errors.New("invalid ip")
 	}
-	if err := c.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("ip.sb rate limit: %w", err)
+	if c.limiter != nil {
+		if err := c.limiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("ip.sb rate limit: %w", err)
+		}
 	}
 
 	url := fmt.Sprintf("%s/%s", baseURL, ip)

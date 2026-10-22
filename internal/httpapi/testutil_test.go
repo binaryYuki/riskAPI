@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
 
 	"risky_ip_filter/internal/cache"
 	"risky_ip_filter/internal/config"
@@ -97,7 +98,7 @@ func newTestEnv(t *testing.T, mutate ...func(*config.Config)) *testEnv {
 		Log:       log,
 		Risk:      env.risk,
 		Lists:     lists,
-		Geo:       geo.New(cfg.ProvidersDir, qq, 1500*time.Millisecond, log),
+		Geo:       geo.New(cfg.ProvidersDir, qq, rate.NewLimiter(5, 1), 1500*time.Millisecond, log),
 		InfoCache: env.cache,
 		Trap:      honeytrap.New(cfg.Honeytrap, log),
 		Signer:    signer,

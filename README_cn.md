@@ -118,6 +118,10 @@ docker-compose up -d
 | `PARSE_WORKER_BASE` | 上游解析 Worker 地址 | `https://xhs-proxy.tzpro.workers.dev` |
 | `PARSE_RATE_LIMIT_PER_MIN` | `/api/v1/parse` 每个客户端 IP 每分钟请求上限（`0` 不限流） | `30` |
 | `INFO_CACHE_MAX_ENTRIES` | `/api/v1/info` 缓存最大条目数（TTL 1 小时） | `20000` |
+| `REDIS_URL` | 可选的 Redis/Valkey 地址（`redis://` 或 `rediss://`）。多副本部署时共享风险数据快照（整个集群每小时只抓取一次数据源）、`/api/v1/info` 二级缓存与 ip.sb 限速；未设置时各实例独立运行，见[多副本部署](#多副本部署k8s--k3s) | _(未设置)_ |
+| `REDIS_KEY_PREFIX` | Redis 键前缀，多个部署共用同一 Redis 时用于隔离 | `riskapi:` |
+| `IPSB_RATE_PER_SEC` | ip.sb 请求速率上限（免费接口按出口 IP 限制 5 次/秒）；设置 `REDIS_URL` 时为全部实例合计，否则为每个实例，`0` 不限速 | `5` |
+| `IPSB_FALLBACK_RATE_PER_SEC` | Redis 暂时不可用时每个实例的 ip.sb 速率（建议设为 `IPSB_RATE_PER_SEC / 副本数`） | 同 `IPSB_RATE_PER_SEC` |
 | `RISK_SIGNING_KEY` | `/api/v2` 令牌的 Ed25519 私钥：PEM（PKCS#8）或 32 字节种子 / PKCS#8 DER 的 base64（`openssl genpkey -algorithm ed25519 -outform DER \| base64`）。格式错误时启动失败 | _(未设置：v2 不签发令牌)_ |
 | `RISK_SIGNING_KID` | 写入令牌和 `/.well-known/risk-keys.json` 的密钥 ID | 公钥指纹 |
 | `RISK_PUBLISHED_KEYS` | 轮换期间继续公布的旧公钥，`kid=base64` 逗号分隔 | _(未设置)_ |
@@ -402,24 +406,83 @@ POST /api/cache/flush/{method}/{range}
 - **网络**: 建议配置CDN和负载均衡
 - **监控**: 集成Prometheus/Grafana监控
 
-### 高可用部署
+### 多副本部署（k8s / k3s）
+多个副本通常共用同一个出口 IP。如果每个副本都自己抓取 30 多个风险数据源、各自调用 ip.sb 和美团，请求量会成倍增加，很容易被上游限流。
+设置 `REDIS_URL` 后：
+- **风险数据源**：每个周期只由一个实例抓取（Redis 锁），抓取结果以 gzip 快照形式发布到 Redis（约 2–3 MB），其它实例每 30 秒检查一次并加载。新 Pod 启动时直接加载已有快照，滚动更新不会再触发重新抓取。
+- **`/api/v1/info`**：本实例内存缓存之外再加一层共享的 Redis 缓存，同一个 IP 在整个集群内只查询一次外部 API。
+- **ip.sb 限速**：全部实例合计不超过 `IPSB_RATE_PER_SEC`。
+
+Redis 只是加速和去重用的，不影响服务可用性：启动时连不上不影响启动；运行中出错会在 5 秒内退回到本实例状态（本地缓存、本地限速、本实例自行抓取），恢复后自动重新使用 Redis。
+不需要多副本时（如单机 `compose.yaml`）不设置 `REDIS_URL` 即可，行为与之前完全一致。
+
+管理接口说明：`/api/cache/flush/info/*` 会同时清理共享缓存，但其它实例的本地缓存仍会保留到过期（最长 1 小时）；`flush/risk`、`flush/all` 只作用于处理该请求的那个实例。
+
 ```yaml
-# docker-compose.yml 示例
-version: '3.8'
-services:
-  riskapi:
-    image: riskapi:latest
-    deploy:
-      replicas: 3
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-    ports:
-      - "8080-8082:8080"
-    environment:
-      - HONEYTRAP_ENABLED=true
-    restart: unless-stopped
+# Valkey 只保存可重建的缓存与快照，不需要持久化
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: valkey}
+  template:
+    metadata:
+      labels: {app: valkey}
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:8.1-alpine
+          # volatile-lru：内存不足时只淘汰带 TTL 的 info 缓存，保留不过期的风险数据快照
+          args: ["--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+          ports:
+            - containerPort: 6379
+          resources:
+            limits: {memory: 320Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+spec:
+  selector: {app: valkey}
+  ports:
+    - port: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: riskapi
+spec:
+  replicas: 4
+  selector:
+    matchLabels: {app: riskapi}
+  template:
+    metadata:
+      labels: {app: riskapi}
+    spec:
+      terminationGracePeriodSeconds: 20 # 需大于程序内 15s 的优雅停机超时
+      containers:
+        - name: riskapi
+          image: <dockerhub-user>/risk-api:latest
+          env:
+            - name: REDIS_URL
+              value: redis://valkey:6379/0
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - containerPort: 8080
+          # 风险 IP 列表加载完成前 /api/ready 返回 503；已有快照时新 Pod 几秒内就绪
+          readinessProbe:
+            httpGet: {path: /api/ready, port: 8080}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /api/status, port: 8080}
+            periodSeconds: 30
+          resources:
+            limits: {memory: 1Gi}
 ```
 
 ## 开发指南
@@ -435,6 +498,7 @@ services:
 │   ├── netlists/        # CDN / IDC（云厂商）网段列表
 │   ├── geo/             # 地理位置聚合（MMDB、纯真、美团、IP.SB）
 │   ├── honeytrap/       # 蜜罐中间件与诱饵路由
+│   ├── shared/          # 可选 Redis/Valkey：多副本共享快照、缓存与限速
 │   └── cache/           # 带 TTL 与容量上限的缓存
 ├── providers/           # 地理位置数据库（MMDB、qqwry.dat，CI 每日更新）
 └── data/                # 静态数据
