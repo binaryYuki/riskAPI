@@ -118,10 +118,11 @@ docker-compose up -d
 | `PARSE_WORKER_BASE` | 上游解析 Worker 地址 | `https://xhs-proxy.tzpro.workers.dev` |
 | `PARSE_RATE_LIMIT_PER_MIN` | `/api/v1/parse` 每个客户端 IP 每分钟请求上限（`0` 不限流） | `30` |
 | `INFO_CACHE_MAX_ENTRIES` | `/api/v1/info` 缓存最大条目数（TTL 1 小时） | `20000` |
-| `REDIS_URL` | 可选的 Redis/Valkey 地址（`redis://` 或 `rediss://`）。多副本部署时共享风险数据快照（整个集群每小时只抓取一次数据源）、`/api/v1/info` 二级缓存与 ip.sb 限速；未设置时各实例独立运行，见[多副本部署](#多副本部署k8s--k3s) | _(未设置)_ |
+| `CLUSTER_MODE` | 设为 `1` 开启多副本集群模式：通过 Redis/Valkey 共享风险数据快照（整个集群每小时只抓取一次数据源）、`/api/v1/info` 二级缓存与 ip.sb 限速，并广播管理操作到所有实例。未开启时各实例独立运行、不连接 Redis，见[多副本部署](#多副本部署k8s--k3s) | _(未设置)_ |
+| `REDIS_URL` | Redis/Valkey 地址（`redis://` 或 `rediss://`）。`CLUSTER_MODE=1` 时必填，缺少或格式错误时启动失败；未开启集群模式时忽略 | _(未设置)_ |
 | `REDIS_KEY_PREFIX` | Redis 键前缀，多个部署共用同一 Redis 时用于隔离 | `riskapi:` |
-| `IPSB_RATE_PER_SEC` | ip.sb 请求速率上限（免费接口按出口 IP 限制 5 次/秒）；设置 `REDIS_URL` 时为全部实例合计，否则为每个实例，`0` 不限速 | `5` |
-| `IPSB_FALLBACK_RATE_PER_SEC` | Redis 暂时不可用时每个实例的 ip.sb 速率（建议设为 `IPSB_RATE_PER_SEC / 副本数`） | 同 `IPSB_RATE_PER_SEC` |
+| `IPSB_RATE_PER_SEC` | ip.sb 请求速率上限（免费接口按出口 IP 限制 5 次/秒）；集群模式下为全部实例合计，否则为每个实例，`0` 不限速 | `5` |
+| `IPSB_FALLBACK_RATE_PER_SEC` | 集群模式下 Redis 暂时不可用时每个实例的 ip.sb 速率（建议设为 `IPSB_RATE_PER_SEC / 副本数`） | 同 `IPSB_RATE_PER_SEC` |
 | `RISK_SIGNING_KEY` | `/api/v2` 令牌的 Ed25519 私钥：PEM（PKCS#8）或 32 字节种子 / PKCS#8 DER 的 base64（`openssl genpkey -algorithm ed25519 -outform DER \| base64`）。格式错误时启动失败 | _(未设置：v2 不签发令牌)_ |
 | `RISK_SIGNING_KID` | 写入令牌和 `/.well-known/risk-keys.json` 的密钥 ID | 公钥指纹 |
 | `RISK_PUBLISHED_KEYS` | 轮换期间继续公布的旧公钥，`kid=base64` 逗号分隔 | _(未设置)_ |
@@ -408,15 +409,14 @@ POST /api/cache/flush/{method}/{range}
 
 ### 多副本部署（k8s / k3s）
 多个副本通常共用同一个出口 IP。如果每个副本都自己抓取 30 多个风险数据源、各自调用 ip.sb 和美团，请求量会成倍增加，很容易被上游限流。
-设置 `REDIS_URL` 后：
+设置 `CLUSTER_MODE=1` 与 `REDIS_URL` 后：
 - **风险数据源**：每个周期只由一个实例抓取（Redis 锁），抓取结果以 gzip 快照形式发布到 Redis（约 2–3 MB），其它实例每 30 秒检查一次并加载。新 Pod 启动时直接加载已有快照，滚动更新不会再触发重新抓取。
 - **`/api/v1/info`**：本实例内存缓存之外再加一层共享的 Redis 缓存，同一个 IP 在整个集群内只查询一次外部 API。
 - **ip.sb 限速**：全部实例合计不超过 `IPSB_RATE_PER_SEC`。
+- **管理接口广播**：`/api/cache/flush/*` 在处理请求的实例上执行，同时清理共享缓存，并通过 Redis pub/sub 通知其它实例执行同样的清理（响应中 `broadcast: true`；广播失败时返回 `broadcast_error`）。广播不持久化，当时断开连接的实例会收不到。
 
 Redis 只是加速和去重用的，不影响服务可用性：启动时连不上不影响启动；运行中出错会在 5 秒内退回到本实例状态（本地缓存、本地限速、本实例自行抓取），恢复后自动重新使用 Redis。
-不需要多副本时（如单机 `compose.yaml`）不设置 `REDIS_URL` 即可，行为与之前完全一致。
-
-管理接口说明：`/api/cache/flush/info/*` 会同时清理共享缓存，但其它实例的本地缓存仍会保留到过期（最长 1 小时）；`flush/risk`、`flush/all` 只作用于处理该请求的那个实例。
+不需要多副本时（如单机 `compose.yaml`）不设置 `CLUSTER_MODE` 即可，行为与之前完全一致。
 
 ```yaml
 # Valkey 只保存可重建的缓存与快照，不需要持久化
@@ -468,8 +468,12 @@ spec:
         - name: riskapi
           image: <dockerhub-user>/risk-api:latest
           env:
+            - name: CLUSTER_MODE
+              value: "1"
             - name: REDIS_URL
               value: redis://valkey:6379/0
+            - name: IPSB_FALLBACK_RATE_PER_SEC # 5 / 副本数
+              value: "1.25"
             - name: LOG_FORMAT
               value: json
           ports:

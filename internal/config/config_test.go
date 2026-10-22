@@ -61,3 +61,23 @@ func TestLoad_OTel(t *testing.T) {
 	assert.Equal(t, "tok", cfg.OTel.BetterStackToken)
 	assert.Equal(t, "warn", cfg.OTel.LogLevel)
 }
+
+func TestLoad_ClusterMode(t *testing.T) {
+	for _, k := range []string{"CLUSTER_MODE", "REDIS_URL", "REDIS_KEY_PREFIX", "IPSB_RATE_PER_SEC", "IPSB_FALLBACK_RATE_PER_SEC"} {
+		t.Setenv(k, "")
+	}
+	cfg := Load()
+	assert.False(t, cfg.ClusterMode)
+	assert.Empty(t, cfg.RedisURL)
+	assert.Equal(t, "riskapi:", cfg.RedisKeyPrefix)
+	assert.InDelta(t, 5, cfg.IPSBRatePerSecond, 0)
+	assert.InDelta(t, 5, cfg.IPSBFallbackRatePerSecond, 0)
+
+	t.Setenv("CLUSTER_MODE", "1")
+	t.Setenv("REDIS_URL", "redis://valkey:6379/0")
+	t.Setenv("IPSB_RATE_PER_SEC", "4")
+	cfg = Load()
+	assert.True(t, cfg.ClusterMode)
+	assert.Equal(t, "redis://valkey:6379/0", cfg.RedisURL)
+	assert.InDelta(t, 4, cfg.IPSBFallbackRatePerSecond, 0, "fallback defaults to IPSB_RATE_PER_SEC")
+}

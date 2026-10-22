@@ -185,3 +185,46 @@ func TestSnapshots_PublishLoadClaim(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, won)
 }
+
+func TestBus_DeliversToOtherInstancesOnly(t *testing.T) {
+	mr := miniredis.RunT(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type inst struct {
+		bus *Bus
+		got chan string
+	}
+	var insts []inst
+	for range 2 {
+		c, err := Open(ctx, "redis://"+mr.Addr(), "test:", log)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		in := inst{bus: c.Bus("admin"), got: make(chan string, 4)}
+		go in.bus.Run(ctx, func(p []byte) { in.got <- string(p) })
+		insts = append(insts, in)
+	}
+	require.Eventually(t, func() bool {
+		return mr.PubSubNumSub("test:bus:admin")["test:bus:admin"] == 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, insts[0].bus.Publish(ctx, []byte("hello\nworld")))
+	select {
+	case got := <-insts[1].got:
+		assert.Equal(t, "hello\nworld", got, "payload may contain newlines")
+	case <-time.After(2 * time.Second):
+		t.Fatal("other instance did not receive the message")
+	}
+	select {
+	case got := <-insts[0].got:
+		t.Fatalf("sender received its own message: %q", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestBus_PublishFailsWhenRedisDown(t *testing.T) {
+	c, mr := newTestClient(t)
+	mr.Close()
+	assert.Error(t, c.Bus("admin").Publish(context.Background(), []byte("x")))
+}

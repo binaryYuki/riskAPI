@@ -75,12 +75,11 @@ func run(cfg config.Config, tel *telemetry.Telemetry) error {
 	lists := netlists.New(cfg.DataDir, log)
 	lists.Reload()
 
-	// 多副本共用出口 IP 时，通过 Redis 共享风险数据快照、info 缓存与 ip.sb 限速，避免重复请求外部数据源被限流
-	var sh *shared.Client
-	if cfg.RedisURL != "" {
-		if sh, err = shared.Open(ctx, cfg.RedisURL, cfg.RedisKeyPrefix, log); err != nil {
-			return fmt.Errorf("REDIS_URL: %w", err)
-		}
+	sh, err := openCluster(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	if sh != nil {
 		defer func() { _ = sh.Close() }()
 	}
 
@@ -119,10 +118,16 @@ func run(cfg config.Config, tel *telemetry.Telemetry) error {
 		TracerProvider: tel.TracerProvider,
 		Signer:         signer,
 	}
+	var bus *shared.Bus
 	if sh != nil {
+		bus = sh.Bus("admin")
 		deps.SharedInfoCache = sh.Cache("info")
+		deps.Broadcaster = bus
 	}
 	server := httpapi.New(deps)
+	if bus != nil {
+		go bus.Run(ctx, server.HandleClusterMessage)
+	}
 
 	srv := &http.Server{
 		Addr:           cfg.Addr,
@@ -156,8 +161,27 @@ func run(cfg config.Config, tel *telemetry.Telemetry) error {
 	return nil
 }
 
-// newIPSBLimiter 配置 Redis 时所有实例共享 IPSB_RATE_PER_SEC，Redis 不可用时每个实例按 IPSB_FALLBACK_RATE_PER_SEC；
-// 未配置 Redis 时每个实例按 IPSB_RATE_PER_SEC。速率 <= 0 表示不限速
+// openCluster CLUSTER_MODE=1 时连接 Redis：多副本共用出口 IP，通过 Redis 共享风险数据快照、info 缓存与 ip.sb 限速，
+// 避免重复请求外部数据源被限流。未开启时返回 nil；开启但缺少或写错 REDIS_URL 时启动失败，避免静默退化为单机模式
+func openCluster(ctx context.Context, cfg config.Config, log *slog.Logger) (*shared.Client, error) {
+	if !cfg.ClusterMode {
+		if cfg.RedisURL != "" {
+			log.Warn("REDIS_URL is ignored because CLUSTER_MODE is not enabled")
+		}
+		return nil, nil
+	}
+	if cfg.RedisURL == "" {
+		return nil, errors.New("CLUSTER_MODE=1 requires REDIS_URL")
+	}
+	sh, err := shared.Open(ctx, cfg.RedisURL, cfg.RedisKeyPrefix, log)
+	if err != nil {
+		return nil, fmt.Errorf("REDIS_URL: %w", err)
+	}
+	return sh, nil
+}
+
+// newIPSBLimiter 集群模式下所有实例共享 IPSB_RATE_PER_SEC，Redis 不可用时每个实例按 IPSB_FALLBACK_RATE_PER_SEC；
+// 单机模式下每个实例按 IPSB_RATE_PER_SEC。速率 <= 0 表示不限速
 func newIPSBLimiter(cfg config.Config, sh *shared.Client) ipsb.Limiter {
 	if cfg.IPSBRatePerSecond <= 0 {
 		return nil

@@ -108,3 +108,59 @@ func TestSharedInfoCache_Flush(t *testing.T) {
 	raw, _, _ = sc.Get(ctx, "2.2.2.2")
 	assert.Nil(t, raw)
 }
+
+// memBroadcaster 记录广播的消息
+type memBroadcaster struct {
+	mu   sync.Mutex
+	msgs [][]byte
+}
+
+func (m *memBroadcaster) Publish(_ context.Context, payload []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.msgs = append(m.msgs, payload)
+	return nil
+}
+
+func TestFlush_BroadcastAppliedOnOtherInstance(t *testing.T) {
+	bc := &memBroadcaster{}
+	a, b := newTestEnv(t), newTestEnv(t)
+	a.server.broadcaster = bc
+	b.cache.Set(infoCachePrefix+"1.1.1.1", "x")
+	b.cache.Set(infoCachePrefix+"2.2.2.2", "y")
+	b.setRisky(map[string]string{"9.9.9.0/24": "src"})
+
+	w := a.do(http.MethodPost, "/api/cache/flush/info/1.1.1.1", asAdmin())
+	assert.Contains(t, w.Body.String(), `"broadcast": true`)
+	w = a.do(http.MethodPost, "/api/cache/flush/risk/9.9.9.0%2F24", asAdmin())
+	assert.Contains(t, w.Body.String(), `"broadcast": true`)
+	require.Len(t, bc.msgs, 2)
+
+	for _, m := range bc.msgs {
+		b.server.HandleClusterMessage(m)
+	}
+	_, found := b.cache.Get(infoCachePrefix + "1.1.1.1")
+	assert.False(t, found)
+	_, found = b.cache.Get(infoCachePrefix + "2.2.2.2")
+	assert.True(t, found)
+	_, risky := b.risk.Lookup("9.9.9.9")
+	assert.False(t, risky, "URL-encoded CIDR is decoded before broadcasting")
+}
+
+func TestFlush_UnsupportedMethodIsNotBroadcast(t *testing.T) {
+	bc := &memBroadcaster{}
+	env := newTestEnv(t)
+	env.server.broadcaster = bc
+	assert.Equal(t, http.StatusBadRequest, env.do(http.MethodPost, "/api/cache/flush/unknown/x", asAdmin()).Code)
+	assert.Empty(t, bc.msgs)
+}
+
+func TestHandleClusterMessage_IgnoresInvalid(t *testing.T) {
+	env := newTestEnv(t)
+	env.cache.Set(infoCachePrefix+"1.1.1.1", "x")
+	env.server.HandleClusterMessage([]byte("not json"))
+	env.server.HandleClusterMessage([]byte(`{"type":"unknown"}`))
+	env.server.HandleClusterMessage([]byte(`{"type":"flush"}`))
+	_, found := env.cache.Get(infoCachePrefix + "1.1.1.1")
+	assert.True(t, found)
+}

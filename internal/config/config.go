@@ -39,12 +39,13 @@ type Config struct {
 	InfoPartialCacheTTL time.Duration // 外部 API 失败（结果不完整）时的缓存时间
 	InfoLookupTimeout   time.Duration // 外部 API 查询超时
 
-	IPSBRatePerSecond         float64 // IPSB_RATE_PER_SEC：ip.sb 请求速率上限；配置 Redis 时为全部实例合计，否则为每个实例，<=0 不限速
-	IPSBFallbackRatePerSecond float64 // IPSB_FALLBACK_RATE_PER_SEC：Redis 暂时不可用时每个实例的速率，默认同 IPSB_RATE_PER_SEC
+	IPSBRatePerSecond         float64 // IPSB_RATE_PER_SEC：ip.sb 请求速率上限；集群模式下为全部实例合计，否则为每个实例，<=0 不限速
+	IPSBFallbackRatePerSecond float64 // IPSB_FALLBACK_RATE_PER_SEC：集群模式下 Redis 暂时不可用时每个实例的速率，默认同 IPSB_RATE_PER_SEC
 
-	// REDIS_URL：可选的 Redis/Valkey（redis:// 或 rediss://）。多副本部署时用于共享 info 缓存、ip.sb 限速与风险数据快照，
-	// 每个周期只由一个实例抓取风险数据源；为空时各实例独立运行（单机部署）
-	RedisURL       string
+	// CLUSTER_MODE=1：多副本部署。通过 REDIS_URL 指定的 Redis/Valkey 共享风险数据快照（每个周期只由一个实例抓取）、
+	// info 缓存与 ip.sb 限速，并用 pub/sub 把管理操作广播到所有实例。未开启时各实例独立运行（单机部署），不连接 Redis
+	ClusterMode    bool
+	RedisURL       string // REDIS_URL：redis:// 或 rediss://，CLUSTER_MODE=1 时必填
 	RedisKeyPrefix string // REDIS_KEY_PREFIX：键前缀，多个部署共用同一 Redis 时用于隔离
 
 	FeedUpdateInterval time.Duration
@@ -121,6 +122,7 @@ func Load() Config {
 		IPSBRatePerSecond:         ipsbRate,
 		IPSBFallbackRatePerSecond: envFloat("IPSB_FALLBACK_RATE_PER_SEC", ipsbRate),
 
+		ClusterMode:    envBool("CLUSTER_MODE", false),
 		RedisURL:       envString("REDIS_URL", ""),
 		RedisKeyPrefix: envString("REDIS_KEY_PREFIX", "riskapi:"),
 

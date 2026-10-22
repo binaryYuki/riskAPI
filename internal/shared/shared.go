@@ -1,6 +1,6 @@
-// Package shared 可选的 Redis/Valkey 共享状态：多副本部署时让各实例共用 info 缓存、ip.sb 限速与风险数据快照，
-// 避免每个副本各自请求外部数据源（同一出口 IP 下容易被限流）。
-// 未配置 REDIS_URL 时不启用，各实例独立运行；运行期 Redis 不可用时各功能自动回退到本实例状态。
+// Package shared 集群模式（CLUSTER_MODE=1）下基于 Redis/Valkey 的共享状态：多副本部署时让各实例共用 info 缓存、
+// ip.sb 限速与风险数据快照，避免每个副本各自请求外部数据源（同一出口 IP 下容易被限流），并在实例间广播管理操作。
+// 单机模式不使用本包；运行期 Redis 不可用时各功能自动回退到本实例状态。
 package shared
 
 import (
