@@ -3,7 +3,7 @@
 ################################################################################
 # Builder stage
 ################################################################################
-ARG GO_VERSION=1.26.9
+ARG GO_VERSION=1.26.10
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 WORKDIR /src
 
@@ -16,7 +16,7 @@ COPY . .
 # Release 时的短暂 404 / 新旧文件与 SHA256SUMS 不一致。每次重试都重新获取 SHA256SUMS。
 ARG GEO_DATA_URL=https://github.com/binaryYuki/riskAPI/releases/download/geo-data
 RUN set -eu; \
-    for f in maxmind/GeoLite2-Country.mmdb maxmind/GeoLite2-ASN.mmdb qqwry/qqwry.dat \
+    for f in maxmind/GeoLite2-Country.mmdb maxmind/GeoLite2-City.mmdb maxmind/GeoLite2-ASN.mmdb qqwry/qqwry.dat \
              ipinfo/ipinfo-asn.mmdb ipinfo/ipinfo-country.mmdb \
              iplocate/iplocate-asn.mmdb iplocate/iplocate-country.mmdb; do \
       test -s "providers/$f" && continue; \

@@ -52,7 +52,7 @@ func (s *Server) requestLog(c *gin.Context) *slog.Logger {
 // 命中蜜罐规则的请求整行封存为一个字符串（sealed），日志里不留明文地址和路径
 func (s *Server) requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, "/.well-known/") {
+		if path := c.Request.URL.Path; strings.HasPrefix(path, "/.well-known/") && path != riskKeysPath {
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}

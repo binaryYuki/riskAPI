@@ -15,7 +15,7 @@ A high-performance Go-based service providing comprehensive IP risk detection, g
 
 ### 🌍 Geolocation Query (`/api/v1/info`)
 - **Multi-source Data Fusion**: Integrates 7 geolocation databases
-  - MaxMind GeoLite2 (Country/ASN)
+  - MaxMind GeoLite2 (Country/City/ASN)
   - IPInfo (Country/ASN)
   - IPLocate (Country/ASN)
   - QQWry Database (High accuracy for Chinese regions)
@@ -132,6 +132,16 @@ docker-compose up -d
 | `PARSE_WORKER_BASE` | Upstream parse worker base URL | `https://xhs-proxy.tzpro.workers.dev` |
 | `PARSE_RATE_LIMIT_PER_MIN` | Per-client-IP limit for `/api/v1/parse` (`0` disables) | `30` |
 | `INFO_CACHE_MAX_ENTRIES` | Max `/api/v1/info` cache entries (1h TTL) | `20000` |
+| `CLUSTER_MODE` | Set to `1` for multi-replica cluster mode: shares the risk list snapshot via Redis/Valkey (feeds fetched once per hour cluster-wide), a second-level `/api/v1/info` cache and the ip.sb rate limit, and broadcasts admin operations to every instance. When off, instances run independently and never connect to Redis. See [Multi-replica deployment](#multi-replica-deployment-k8s--k3s) | _(unset)_ |
+| `REDIS_URL` | Redis/Valkey URL (`redis://` or `rediss://`). Required with `CLUSTER_MODE=1` (startup fails if missing or invalid); ignored otherwise | _(unset)_ |
+| `REDIS_KEY_PREFIX` | Redis key prefix, to isolate deployments sharing one Redis | `riskapi:` |
+| `IPSB_RATE_PER_SEC` | ip.sb request rate limit (the free API allows 5/s per egress IP); cluster-wide total in cluster mode, otherwise per instance; `0` disables | `5` |
+| `IPSB_FALLBACK_RATE_PER_SEC` | Per-instance ip.sb rate while Redis is unreachable in cluster mode (suggested: `IPSB_RATE_PER_SEC / replicas`) | same as `IPSB_RATE_PER_SEC` |
+| `RISK_SIGNING_KEY` | Ed25519 private key for `/api/v2` tokens: PEM (PKCS#8) or base64 of the 32-byte seed / PKCS#8 DER (`openssl genpkey -algorithm ed25519 -outform DER \| base64`). Startup fails if it is invalid | _(unset: v2 issues no tokens)_ |
+| `RISK_SIGNING_KID` | Key id written into tokens and `/.well-known/risk-keys.json` | public-key fingerprint |
+| `RISK_PUBLISHED_KEYS` | Old public keys to keep publishing during rotation, `kid=base64` comma-separated | _(unset)_ |
+| `RISK_TOKEN_TTL_SEC` | Token lifetime (seconds) | `120` |
+| `RISK_TOKEN_AUDIENCES` | Allowed `aud` host names, comma-separated; `*.example.com` matches any subdomain but not `example.com` itself, so list both for apex + subdomains (empty = any) | _(unset)_ |
 | `LISTEN_ADDR` | Listen address | `:8080` |
 | `LOG_FORMAT` | Log format: `text` or `json` | `text` |
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
@@ -166,6 +176,47 @@ GET /api/v1/ip
 ```
 
 `isRisky` is true for risk-list hits and for sources flagged by this service's own honeypot (reported with source `honeytrap`). `isIdc` / `isProxy` are independent flags: `isIdc` covers data/idc cloud ranges and datacenter feeds; `isProxy` covers VPN/Tor/iCloud Private Relay and public proxy lists (public proxies only set the flag, they do not make an IP risky).
+
+### 1.1 Signed Results (v2)
+```bash
+# Requester IP verdict, signed
+GET /api/v2/ip?aud={site host}&nonce={one-time random string}
+
+# Requester IP geolocation + verdict, signed (requester only, no /{ip} form)
+GET /api/v2/info?aud={site host}&nonce={one-time random string}
+
+# Verification public keys (JWK Set, OKP/Ed25519, by kid)
+GET /.well-known/risk-keys.json
+```
+
+The browser calls v2 and forwards `token` unchanged to the integrating site's backend, which verifies it with the published public key, so tampering with any field invalidates the signature. v2 responses are the v1 bodies plus `token` (`/api/v2/info` also carries `isRisky` / `isIdc` / `isProxy`):
+
+```json
+{
+  "status": "ok", "message": "IP is not listed as risky.", "ip": "2a00:…",
+  "isRisky": false, "isIdc": false, "isProxy": false,
+  "token": "<base64url(payload)>.<base64url(Ed25519 signature)>"
+}
+```
+
+The signature covers the ASCII bytes of the first segment (both segments unpadded base64url). Payload:
+
+```json
+{ "v": 1, "kid": "2026-10", "ip": "2a00:…", "status": "ok", "isRisky": false, "isIdc": false, "isProxy": false,
+  "aud": "gdue-ca.paperee.guru", "nonce": "…", "iat": 1791979000, "exp": 1791979120 }
+```
+
+The verifier must check: signature (key chosen by `kid`), `exp`, `aud` equals its own host, `nonce` equals the one it issued and has not been used, and `ip` matches the visitor IP it sees (compare IPv6 by /64).
+
+- `aud` and `nonce` are optional together: without both, no token is issued. Only one of them → 400. `aud` must be a bare host name; `nonce` must be 8–128 chars of `[A-Za-z0-9._~-]`.
+- Signing not configured → 503; `aud` outside `RISK_TOKEN_AUDIENCES` → 403; 403 also when:
+  - Neither `Origin` nor `Referer` is present (e.g. curl or a server-side call).
+  - The host of `Origin` or `Referer` differs from `aud`; when both are sent, both must match.
+  - `Sec-Fetch-Mode: navigate`, meaning the URL was opened in the address bar, followed as a link, or loaded in an iframe.
+
+  Tokens can only be requested by `fetch`/XHR from the integrating site's pages.
+- v2 and `/.well-known/risk-keys.json` send `Access-Control-Allow-Origin: *` without credentials; v1 CORS is unchanged. The key set is cacheable for 5 minutes.
+- Key rotation: switch `RISK_SIGNING_KEY` / `RISK_SIGNING_KID` to the new key and list the old public key in `RISK_PUBLISHED_KEYS` for at least the token TTL plus the key-set cache time.
 
 ### 2. Geolocation Query (New Feature)
 ```bash
@@ -428,24 +479,86 @@ Limits: submitted passwords are not recoverable (only their length and a truncat
 - **Network**: Recommended CDN and load balancer configuration
 - **Monitoring**: Integrate Prometheus/Grafana monitoring
 
-### High Availability Deployment
+### Multi-replica deployment (k8s / k3s)
+Replicas usually share one egress IP. If every replica fetches the 30+ risk feeds and calls ip.sb / Meituan on its own, upstream traffic multiplies and gets rate limited.
+With `CLUSTER_MODE=1` and `REDIS_URL` set:
+- **Risk feeds**: each cycle exactly one instance fetches (Redis lock) and publishes a gzip snapshot (~2–3 MB); the others check every 30s and load it. New pods load the existing snapshot on startup, so rolling updates no longer refetch everything.
+- **`/api/v1/info`**: a shared Redis cache sits behind each instance's in-memory cache, so an IP is looked up externally once per cluster.
+- **ip.sb rate limit**: all instances together stay under `IPSB_RATE_PER_SEC`.
+- **Admin broadcast**: `/api/cache/flush/*` runs on the instance that handles the request, clears the shared cache, and notifies the other instances over Redis pub/sub to apply the same flush (`broadcast: true` in the response, `broadcast_error` on failure). Messages are not persisted; an instance disconnected at that moment misses them.
+
+Redis is an optimisation, not a dependency: being unreachable at startup does not block startup; errors at runtime fall back to local state within 5s (local cache, local rate limit, per-instance fetching), and Redis is used again once it recovers.
+For a single host (e.g. `compose.yaml`) simply leave `CLUSTER_MODE` unset; behaviour is unchanged.
+
 ```yaml
-# docker-compose.yml example
-version: '3.8'
-services:
-  riskapi:
-    image: riskapi:latest
-    deploy:
-      replicas: 3
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-    ports:
-      - "8080-8082:8080"
-    environment:
-      - HONEYTRAP_ENABLED=true
-    restart: unless-stopped
+# Valkey only holds rebuildable cache and snapshots; no persistence needed
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: valkey}
+  template:
+    metadata:
+      labels: {app: valkey}
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:8.1-alpine
+          # volatile-lru: under memory pressure only TTL-bound info cache is evicted, never the risk list snapshot
+          args: ["--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+          ports:
+            - containerPort: 6379
+          resources:
+            limits: {memory: 320Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+spec:
+  selector: {app: valkey}
+  ports:
+    - port: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: riskapi
+spec:
+  replicas: 4
+  selector:
+    matchLabels: {app: riskapi}
+  template:
+    metadata:
+      labels: {app: riskapi}
+    spec:
+      terminationGracePeriodSeconds: 20 # must exceed the 15s in-process graceful shutdown timeout
+      containers:
+        - name: riskapi
+          image: <dockerhub-user>/risk-api:latest
+          env:
+            - name: CLUSTER_MODE
+              value: "1"
+            - name: REDIS_URL
+              value: redis://valkey:6379/0
+            - name: IPSB_FALLBACK_RATE_PER_SEC # 5 / replicas
+              value: "1.25"
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - containerPort: 8080
+          # /api/ready returns 503 until risk lists load; with a snapshot present new pods are ready in seconds
+          readinessProbe:
+            httpGet: {path: /api/ready, port: 8080}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /api/status, port: 8080}
+            periodSeconds: 30
+          resources:
+            limits: {memory: 1Gi}
 ```
 
 ## Development Guide
@@ -460,7 +573,8 @@ services:
 │   ├── ipset/           # Longest-prefix-match IP table (bart), bogon checks
 │   ├── netlists/        # CDN / IDC (cloud provider) lists
 │   ├── geo/             # Geolocation aggregation (MMDB, QQWry, Meituan, IP.SB)
-│   ├── honeytrap/       # Honeypot: rule table, per-source scoring, fake content, flagging
+│   ├── shared/          # Optional Redis/Valkey: shared snapshot, cache and rate limit across replicas
+│   ├── honeytrap/       # Honeypot middleware, decoy routes, scoring and source flagging
 │   └── cache/           # TTL + size-bounded cache
 ├── providers/           # Geolocation databases (MMDB, qqwry.dat; updated daily by CI)
 └── data/                # Static data

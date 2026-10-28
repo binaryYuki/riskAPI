@@ -146,12 +146,15 @@ jobs:
           set -euo pipefail
           HTTP_CODE=$(curl -sS -X POST -o /tmp/webhook_resp.txt -w "%{http_code}" "${WEBHOOK_URL}")
           echo "Portainer webhook HTTP ${HTTP_CODE}"
-          if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+
+          if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -gt 409 ]; then
             echo "Redeploy failed. Response body:"
             cat /tmp/webhook_resp.txt
             exit 1
           fi
+
           echo "Redeploy triggered successfully."
+
 
       # 已迁移到 Portainer，Koyeb 部署暂时停用
       # - name: Redeploy Koyeb service

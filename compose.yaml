@@ -1,6 +1,6 @@
 # 自托管部署用。地理位置数据库缺失时构建过程会自动从 Release geo-data 下载；
 # 想用源头最新版可先运行 ./scripts/fetch-geo-data.sh。
-# 可选配置（ADMIN_TOKEN、PARSE_VV_SECRET、OPENTELEMETRY 等，见 README）：
+# 可选配置（ADMIN_TOKEN、PARSE_VV_SECRET、RISK_SIGNING_KEY、OPENTELEMETRY 等，见 README）：
 #   - 本地 / 手动部署：写入同目录 .env 文件
 #   - Portainer 从 Git 部署：在 stack 页面的 Environment variables 中填写，
 #     Portainer 会写入 stack.env；页面上的变量只替换本文件里的 ${VAR}，不会自动传给容器，
