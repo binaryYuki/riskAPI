@@ -39,11 +39,31 @@ type Config struct {
 	InfoPartialCacheTTL time.Duration // 外部 API 失败（结果不完整）时的缓存时间
 	InfoLookupTimeout   time.Duration // 外部 API 查询超时
 
+	IPSBRatePerSecond         float64 // IPSB_RATE_PER_SEC：ip.sb 请求速率上限；集群模式下为全部实例合计，否则为每个实例，<=0 不限速
+	IPSBFallbackRatePerSecond float64 // IPSB_FALLBACK_RATE_PER_SEC：集群模式下 Redis 暂时不可用时每个实例的速率，默认同 IPSB_RATE_PER_SEC
+
+	// CLUSTER_MODE=1：多副本部署。通过 REDIS_URL 指定的 Redis/Valkey 共享风险数据快照（每个周期只由一个实例抓取）、
+	// info 缓存与 ip.sb 限速，并用 pub/sub 把管理操作广播到所有实例。未开启时各实例独立运行（单机部署），不连接 Redis
+	ClusterMode    bool
+	RedisURL       string // REDIS_URL：redis:// 或 rediss://，CLUSTER_MODE=1 时必填
+	RedisKeyPrefix string // REDIS_KEY_PREFIX：键前缀，多个部署共用同一 Redis 时用于隔离
+
 	FeedUpdateInterval time.Duration
 	FeedFetch          feeds.FetchConfig
 	Feeds              []feeds.Feed
 
 	Honeytrap honeytrap.Config
+
+	RiskToken RiskTokenConfig
+}
+
+// RiskTokenConfig /api/v2 结果签名配置；SigningKey 为空时 v2 接口不签发令牌
+type RiskTokenConfig struct {
+	SigningKey    string        // RISK_SIGNING_KEY：Ed25519 私钥（PEM 或 base64 的种子/PKCS#8 DER）
+	KeyID         string        // RISK_SIGNING_KID：为空时由公钥指纹派生
+	PublishedKeys []string      // RISK_PUBLISHED_KEYS：轮换期间继续公布的旧公钥，kid=base64 逗号分隔
+	TTL           time.Duration // RISK_TOKEN_TTL_SEC：令牌有效期
+	Audiences     []string      // RISK_TOKEN_AUDIENCES：允许的 aud 域名，*.example.com 匹配子域名，为空时不限制
 }
 
 // OTelConfig OpenTelemetry 上报配置，仅在 OpenTelemetry 开启时生效。
@@ -67,6 +87,7 @@ var DefaultTrustedProxies = []string{
 // Load 读取环境变量并填充默认值
 func Load() Config {
 	logLevel := envString("LOG_LEVEL", "info")
+	ipsbRate := envFloat("IPSB_RATE_PER_SEC", 5)
 	return Config{
 		Addr:            envString("LISTEN_ADDR", ":8080"),
 		ShutdownTimeout: 15 * time.Second,
@@ -97,6 +118,14 @@ func Load() Config {
 		InfoPartialCacheTTL: time.Minute,
 		InfoLookupTimeout:   1500 * time.Millisecond,
 
+		// ip.sb 免费接口按出口 IP 限制 5 次/秒
+		IPSBRatePerSecond:         ipsbRate,
+		IPSBFallbackRatePerSecond: envFloat("IPSB_FALLBACK_RATE_PER_SEC", ipsbRate),
+
+		ClusterMode:    envBool("CLUSTER_MODE", false),
+		RedisURL:       envString("REDIS_URL", ""),
+		RedisKeyPrefix: envString("REDIS_KEY_PREFIX", "riskapi:"),
+
 		FeedUpdateInterval: time.Hour,
 		FeedFetch: feeds.FetchConfig{
 			Timeout:    10 * time.Second,
@@ -120,6 +149,14 @@ func Load() Config {
 			MaxOffenders:   envInt("HONEYTRAP_MAX_OFFENDERS", 100000),
 			Secret:         os.Getenv("HONEYTRAP_SECRET"),
 			FlagFile:       envString("HONEYTRAP_FLAG_FILE", ""),
+		},
+
+		RiskToken: RiskTokenConfig{
+			SigningKey:    os.Getenv("RISK_SIGNING_KEY"),
+			KeyID:         envString("RISK_SIGNING_KID", ""),
+			PublishedKeys: envList("RISK_PUBLISHED_KEYS", nil),
+			TTL:           time.Duration(envInt("RISK_TOKEN_TTL_SEC", 120)) * time.Second,
+			Audiences:     envList("RISK_TOKEN_AUDIENCES", nil),
 		},
 	}
 }

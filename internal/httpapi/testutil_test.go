@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
 
 	"risky_ip_filter/internal/cache"
 	"risky_ip_filter/internal/config"
@@ -20,6 +21,7 @@ import (
 	"risky_ip_filter/internal/geo/qqwry"
 	"risky_ip_filter/internal/honeytrap"
 	"risky_ip_filter/internal/netlists"
+	"risky_ip_filter/internal/risktoken"
 )
 
 const (
@@ -72,9 +74,21 @@ func newTestEnvWithLog(t *testing.T, log *slog.Logger, mutate ...func(*config.Co
 	cfg.ParseSecret = ""
 	cfg.ParseRateLimitPerMin = 0
 	cfg.Honeytrap = honeytrap.Config{Enabled: false}
+	cfg.RiskToken = config.RiskTokenConfig{TTL: 2 * time.Minute}
 	cfg.Feeds = nil // 需要真实抓取的测试通过 mutate 指定，再调用 env.risk.Update
 	for _, m := range mutate {
 		m(&cfg)
+	}
+
+	var signer *risktoken.Signer
+	if cfg.RiskToken.SigningKey != "" {
+		priv, err := risktoken.ParsePrivateKey(cfg.RiskToken.SigningKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if signer, err = risktoken.NewSigner(priv, cfg.RiskToken.KeyID, cfg.RiskToken.TTL, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	lists, qq := sharedDeps()
@@ -89,9 +103,10 @@ func newTestEnvWithLog(t *testing.T, log *slog.Logger, mutate ...func(*config.Co
 		Log:       log,
 		Risk:      env.risk,
 		Lists:     lists,
-		Geo:       geo.New(cfg.ProvidersDir, qq, 1500*time.Millisecond, log),
+		Geo:       geo.New(cfg.ProvidersDir, qq, rate.NewLimiter(5, 1), 1500*time.Millisecond, log),
 		InfoCache: env.cache,
 		Trap:      honeytrap.New(cfg.Honeytrap, log),
+		Signer:    signer,
 	})
 	env.h = env.server.Handler()
 	return env

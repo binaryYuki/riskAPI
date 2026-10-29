@@ -57,6 +57,8 @@ type Store struct {
 	updateMu sync.Mutex           // 串行化 Update，保护 lastGood
 	lastGood map[string]*feedData // 每个源最近一次成功抓取的结果（Feed.ID → data）
 	ready    atomic.Bool          // 首轮更新完成且至少一个源可用
+
+	coord Coordinator // 为 nil 时本实例独立抓取
 }
 
 // NewStore 创建空的风险表
@@ -170,8 +172,13 @@ func (s *Store) Remove(entry string) bool {
 	return removed
 }
 
-// Run 立即执行一次更新，之后按 interval 周期更新，ctx 取消时退出
+// Run 立即执行一次更新，之后按 interval 周期更新，ctx 取消时退出。
+// 设置了 Coordinator 时，整个集群每个 interval 只由一个实例抓取，其它实例加载其发布的快照
 func (s *Store) Run(ctx context.Context, interval time.Duration) {
+	if s.coord != nil {
+		s.runShared(ctx, interval)
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -186,8 +193,9 @@ func (s *Store) Run(ctx context.Context, interval time.Duration) {
 
 // Update 并发抓取全部数据源，未变化（304）或失败的源沿用上次成功的数据，再整体替换风险表。
 // 即使所有源都未变化也会重建，保证 Clear / Remove 之后的表能在下一轮恢复。
+// 返回是否替换了风险表。
 // 抓取与构建期间查询继续使用旧表。
-func (s *Store) Update(ctx context.Context) {
+func (s *Store) Update(ctx context.Context) bool {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
 
@@ -217,7 +225,7 @@ func (s *Store) Update(ctx context.Context) {
 
 	if ctx.Err() != nil {
 		s.log.Info("risk list update cancelled")
-		return
+		return false
 	}
 
 	// 按配置顺序合并，保证同一前缀出现在多个源时标签确定
@@ -247,8 +255,9 @@ func (s *Store) Update(ctx context.Context) {
 
 	if fresh+unchanged+stale == 0 {
 		s.log.Warn("no data obtained from any source, risk list not updated")
-		return
+		return false
 	}
 	s.replace(batches)
 	s.ready.Store(true)
+	return true
 }

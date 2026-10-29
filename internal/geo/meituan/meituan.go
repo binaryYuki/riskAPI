@@ -26,6 +26,12 @@ type ipResp struct {
 		} `json:"rgeo"`
 		Lat float64 `json:"lat"`
 	} `json:"data"`
+	// 定位不到时返回 HTTP 200 + {"error":{"code":404,"type":"Data Not found","message":"Can Not Loc"}}
+	Error *struct {
+		Code    int    `json:"code"`
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 type locationResp struct {
@@ -50,11 +56,20 @@ type locationResp struct {
 	} `json:"data"`
 }
 
-const (
+const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+// 测试时替换为 httptest 地址
+var (
 	ipAPI       = "https://apimobile.meituan.com/locate/v2/ip/loc"
 	locationAPI = "https://apimobile.meituan.com/group/v1/city/latlng"
-	ua          = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+// ErrNotFound 美团明确表示没有该 IP 的定位数据（重试也不会变化）
+var ErrNotFound = errors.New("meituan: no location data for ip")
+
+// defaultClient 未传 client 时共用。Transport 留空，请求时使用 http.DefaultTransport
+// （main 已调大其连接池并可能用 otelhttp 包装；包初始化时克隆会丢失这两项）
+var defaultClient = &http.Client{Timeout: 5 * time.Second}
 
 // QueryOptions controls optional behaviour.
 // Enhanced triggers the second detail lookup (lat/lng to rich city record).
@@ -70,11 +85,11 @@ func Query(ctx context.Context, ip string, client *http.Client, opt QueryOptions
 		return nil, errors.New("invalid ip")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
+		client = defaultClient
 	}
 	if opt.Timeout > 0 {
 		// create a derived client with its own timeout
-		client = &http.Client{Timeout: opt.Timeout}
+		client = &http.Client{Timeout: opt.Timeout, Transport: client.Transport}
 	}
 
 	ipData, err := queryIP(ctx, client, ip)
@@ -95,7 +110,7 @@ func Query(ctx context.Context, ip string, client *http.Client, opt QueryOptions
 	}
 
 	if opt.Enhanced {
-		if loc, err := queryLocation(ctx, client, ipData.Data.Lat, ipData.Data.Lng); err == nil && loc != nil {
+		if loc, err := queryLocation(ctx, client, ipData.Data.Lat, ipData.Data.Lng, "0"); err == nil && loc != nil {
 			result["area_name"] = loc.Data.AreaName
 			result["detail"] = loc.Data.Detail
 			result["city_pinyin"] = loc.Data.CityPinyin
@@ -138,20 +153,53 @@ func queryIP(ctx context.Context, client *http.Client, ip string) (*ipResp, erro
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
+	if out.Error != nil && out.Error.Code == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
 	if out.Data.RGeo.Country == "" {
 		return nil, errors.New("meituan ip api malformed data")
 	}
 	return &out, nil
 }
 
-func queryLocation(ctx context.Context, client *http.Client, lat, lng float64) (*locationResp, error) {
+// ReverseGeocode 用美团把经纬度解析为行政区划（tag=1 返回附近地点的精确坐标）。
+// 美团无该坐标数据时返回 nil, nil。
+func ReverseGeocode(ctx context.Context, client *http.Client, lat, lng float64) (map[string]interface{}, error) {
+	if client == nil {
+		client = defaultClient
+	}
+	loc, err := queryLocation(ctx, client, lat, lng, "1")
+	if err != nil {
+		return nil, err
+	}
+	d := loc.Data
+	if d.Country == "" && d.City == "" {
+		return nil, nil
+	}
+	return map[string]interface{}{
+		"country":        d.Country,
+		"province":       d.Province,
+		"city":           d.City,
+		"district":       d.District,
+		"area_name":      d.AreaName,
+		"detail":         d.Detail,
+		"city_pinyin":    d.CityPinyin,
+		"open_city_name": d.OpenCityName,
+		"is_foreign":     d.IsForeign,
+		"dp_city_id":     d.DPCityID,
+		"latitude":       d.Lat,
+		"longitude":      d.Lng,
+	}, nil
+}
+
+func queryLocation(ctx context.Context, client *http.Client, lat, lng float64, tag string) (*locationResp, error) {
 	url := fmt.Sprintf("%s/%f,%f", locationAPI, lat, lng)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	q := req.URL.Query()
-	q.Set("tag", "0")
+	q.Set("tag", tag)
 	req.URL.RawQuery = q.Encode()
 	setHeaders(req)
 

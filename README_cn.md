@@ -13,7 +13,7 @@
 
 ### 🌍 地理位置查询 (`/api/v1/info`)
 - **多数据源融合**: 集成7个地理位置数据库
-  - MaxMind GeoLite2 (国家/ASN)
+  - MaxMind GeoLite2 (国家/城市/ASN)
   - IPInfo (国家/ASN)
   - IPLocate (国家/ASN)  
   - 纯真IP数据库 (中国地区高精度)
@@ -129,6 +129,16 @@ docker-compose up -d
 | `PARSE_WORKER_BASE` | 上游解析 Worker 地址 | `https://xhs-proxy.tzpro.workers.dev` |
 | `PARSE_RATE_LIMIT_PER_MIN` | `/api/v1/parse` 每个客户端 IP 每分钟请求上限（`0` 不限流） | `30` |
 | `INFO_CACHE_MAX_ENTRIES` | `/api/v1/info` 缓存最大条目数（TTL 1 小时） | `20000` |
+| `CLUSTER_MODE` | 设为 `1` 开启多副本集群模式：通过 Redis/Valkey 共享风险数据快照（整个集群每小时只抓取一次数据源）、`/api/v1/info` 二级缓存与 ip.sb 限速，并广播管理操作到所有实例。未开启时各实例独立运行、不连接 Redis，见[多副本部署](#多副本部署k8s--k3s) | _(未设置)_ |
+| `REDIS_URL` | Redis/Valkey 地址（`redis://` 或 `rediss://`）。`CLUSTER_MODE=1` 时必填，缺少或格式错误时启动失败；未开启集群模式时忽略 | _(未设置)_ |
+| `REDIS_KEY_PREFIX` | Redis 键前缀，多个部署共用同一 Redis 时用于隔离 | `riskapi:` |
+| `IPSB_RATE_PER_SEC` | ip.sb 请求速率上限（免费接口按出口 IP 限制 5 次/秒）；集群模式下为全部实例合计，否则为每个实例，`0` 不限速 | `5` |
+| `IPSB_FALLBACK_RATE_PER_SEC` | 集群模式下 Redis 暂时不可用时每个实例的 ip.sb 速率（建议设为 `IPSB_RATE_PER_SEC / 副本数`） | 同 `IPSB_RATE_PER_SEC` |
+| `RISK_SIGNING_KEY` | `/api/v2` 令牌的 Ed25519 私钥：PEM（PKCS#8）或 32 字节种子 / PKCS#8 DER 的 base64（`openssl genpkey -algorithm ed25519 -outform DER \| base64`）。格式错误时启动失败 | _(未设置：v2 不签发令牌)_ |
+| `RISK_SIGNING_KID` | 写入令牌和 `/.well-known/risk-keys.json` 的密钥 ID | 公钥指纹 |
+| `RISK_PUBLISHED_KEYS` | 轮换期间继续公布的旧公钥，`kid=base64` 逗号分隔 | _(未设置)_ |
+| `RISK_TOKEN_TTL_SEC` | 令牌有效期（秒） | `120` |
+| `RISK_TOKEN_AUDIENCES` | 允许的 `aud` 域名，逗号分隔；`*.example.com` 匹配任意层级子域名但不含 `example.com` 本身，主域名需另写（为空不限制） | _(未设置)_ |
 | `LISTEN_ADDR` | 监听地址 | `:8080` |
 | `LOG_FORMAT` | 日志格式：`text` 或 `json` | `text` |
 | `LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
@@ -163,6 +173,47 @@ GET /api/v1/ip
 ```
 
 `isRisky` 在命中风险列表或被本服务蜜罐标记（来源名为 `honeytrap`）时为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
+
+### 1.1 签名结果 (v2)
+```bash
+# 请求方 IP 风险判定，带签名
+GET /api/v2/ip?aud={接入站点域名}&nonce={一次性随机串}
+
+# 请求方 IP 地理位置 + 风险判定，带签名（只查请求方自身，没有 /{ip} 形式）
+GET /api/v2/info?aud={接入站点域名}&nonce={一次性随机串}
+
+# 验签公钥（JWK Set，OKP/Ed25519，按 kid 列出）
+GET /.well-known/risk-keys.json
+```
+
+浏览器请求 v2，把 `token` 原样转交给接入站点的服务端，服务端用公布的公钥验签；任何字段被篡改签名都会失效。v2 响应为 v1 的内容加上 `token`（`/api/v2/info` 还带 `isRisky` / `isIdc` / `isProxy`）：
+
+```json
+{
+  "status": "ok", "message": "IP is not listed as risky.", "ip": "2a00:…",
+  "isRisky": false, "isIdc": false, "isProxy": false,
+  "token": "<base64url(payload)>.<base64url(Ed25519 签名)>"
+}
+```
+
+签名覆盖第一段的 ASCII 字节（两段均为不带填充的 base64url）。payload：
+
+```json
+{ "v": 1, "kid": "2026-10", "ip": "2a00:…", "status": "ok", "isRisky": false, "isIdc": false, "isProxy": false,
+  "aud": "gdue-ca.paperee.guru", "nonce": "…", "iat": 1791979000, "exp": 1791979120 }
+```
+
+接入方需校验：签名（按 `kid` 选公钥）、`exp`、`aud` 等于本站域名、`nonce` 是本站下发且未使用过的、`ip` 与本站看到的访客 IP 一致（IPv6 按 /64 比较）。
+
+- `aud` 与 `nonce` 要么都带、要么都不带：都不带时不签发令牌；只带其一返回 400。`aud` 必须是纯域名；`nonce` 为 8～128 位 `[A-Za-z0-9._~-]`。
+- 未配置签名返回 503；`aud` 不在 `RISK_TOKEN_AUDIENCES` 中返回 403；以下情况返回 403：
+  - 既没有 `Origin` 也没有 `Referer`（如 curl 或服务端直接调用）。
+  - `Origin` 或 `Referer` 的主机名与 `aud` 不一致，两者都带时都要一致。
+  - `Sec-Fetch-Mode: navigate`，即在浏览器地址栏直接打开、点链接跳转或用 iframe 加载。
+
+  令牌只能由接入站点页面里的 `fetch`/XHR 申请。
+- v2 与 `/.well-known/risk-keys.json` 返回 `Access-Control-Allow-Origin: *`，不带凭据；v1 的 CORS 不变。公钥集合可缓存 5 分钟。
+- 轮换密钥：把 `RISK_SIGNING_KEY` / `RISK_SIGNING_KID` 换成新密钥，旧公钥写入 `RISK_PUBLISHED_KEYS`，至少保留令牌有效期 + 公钥缓存时间。
 
 ### 2. 地理位置查询 (新功能)
 ```bash
@@ -425,24 +476,86 @@ scripts/honeytrap-reveal.py --env-file .env app.log.1 app.log.2
 - **网络**: 建议配置CDN和负载均衡
 - **监控**: 集成Prometheus/Grafana监控
 
-### 高可用部署
+### 多副本部署（k8s / k3s）
+多个副本通常共用同一个出口 IP。如果每个副本都自己抓取 30 多个风险数据源、各自调用 ip.sb 和美团，请求量会成倍增加，很容易被上游限流。
+设置 `CLUSTER_MODE=1` 与 `REDIS_URL` 后：
+- **风险数据源**：每个周期只由一个实例抓取（Redis 锁），抓取结果以 gzip 快照形式发布到 Redis（约 2–3 MB），其它实例每 30 秒检查一次并加载。新 Pod 启动时直接加载已有快照，滚动更新不会再触发重新抓取。
+- **`/api/v1/info`**：本实例内存缓存之外再加一层共享的 Redis 缓存，同一个 IP 在整个集群内只查询一次外部 API。
+- **ip.sb 限速**：全部实例合计不超过 `IPSB_RATE_PER_SEC`。
+- **管理接口广播**：`/api/cache/flush/*` 在处理请求的实例上执行，同时清理共享缓存，并通过 Redis pub/sub 通知其它实例执行同样的清理（响应中 `broadcast: true`；广播失败时返回 `broadcast_error`）。广播不持久化，当时断开连接的实例会收不到。
+
+Redis 只是加速和去重用的，不影响服务可用性：启动时连不上不影响启动；运行中出错会在 5 秒内退回到本实例状态（本地缓存、本地限速、本实例自行抓取），恢复后自动重新使用 Redis。
+不需要多副本时（如单机 `compose.yaml`）不设置 `CLUSTER_MODE` 即可，行为与之前完全一致。
+
 ```yaml
-# docker-compose.yml 示例
-version: '3.8'
-services:
-  riskapi:
-    image: riskapi:latest
-    deploy:
-      replicas: 3
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-    ports:
-      - "8080-8082:8080"
-    environment:
-      - HONEYTRAP_ENABLED=true
-    restart: unless-stopped
+# Valkey 只保存可重建的缓存与快照，不需要持久化
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: valkey}
+  template:
+    metadata:
+      labels: {app: valkey}
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:8.1-alpine
+          # volatile-lru：内存不足时只淘汰带 TTL 的 info 缓存，保留不过期的风险数据快照
+          args: ["--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+          ports:
+            - containerPort: 6379
+          resources:
+            limits: {memory: 320Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+spec:
+  selector: {app: valkey}
+  ports:
+    - port: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: riskapi
+spec:
+  replicas: 4
+  selector:
+    matchLabels: {app: riskapi}
+  template:
+    metadata:
+      labels: {app: riskapi}
+    spec:
+      terminationGracePeriodSeconds: 20 # 需大于程序内 15s 的优雅停机超时
+      containers:
+        - name: riskapi
+          image: <dockerhub-user>/risk-api:latest
+          env:
+            - name: CLUSTER_MODE
+              value: "1"
+            - name: REDIS_URL
+              value: redis://valkey:6379/0
+            - name: IPSB_FALLBACK_RATE_PER_SEC # 5 / 副本数
+              value: "1.25"
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - containerPort: 8080
+          # 风险 IP 列表加载完成前 /api/ready 返回 503；已有快照时新 Pod 几秒内就绪
+          readinessProbe:
+            httpGet: {path: /api/ready, port: 8080}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /api/status, port: 8080}
+            periodSeconds: 30
+          resources:
+            limits: {memory: 1Gi}
 ```
 
 ## 开发指南
@@ -457,7 +570,8 @@ services:
 │   ├── ipset/           # 最长前缀匹配 IP 表（bart）、bogon 判断
 │   ├── netlists/        # CDN / IDC（云厂商）网段列表
 │   ├── geo/             # 地理位置聚合（MMDB、纯真、美团、IP.SB）
-│   ├── honeytrap/       # 蜜罐：规则表、按来源计分、假内容、来源标记
+│   ├── shared/          # 可选 Redis/Valkey：多副本共享快照、缓存与限速
+│   ├── honeytrap/       # 蜜罐中间件、诱饵路由、规则计分与来源标记
 │   └── cache/           # 带 TTL 与容量上限的缓存
 ├── providers/           # 地理位置数据库（MMDB、qqwry.dat，CI 每日更新）
 └── data/                # 静态数据

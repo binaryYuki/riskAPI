@@ -128,6 +128,11 @@ func (s *Server) checkRequestIP(c *gin.Context) {
 		handleError(c, http.StatusBadRequest, "Invalid or unidentifiable IP address.")
 		return
 	}
+	c.IndentedJSON(http.StatusOK, s.requestIPResponse(ip))
+}
+
+// requestIPResponse 判定请求方自身 IP（v1/v2 共用）；调用方需先校验 IP 格式
+func (s *Server) requestIPResponse(ip string) ResponseWithIP {
 	v := s.classify(ip)
 	resp := newIPResponse(ip, v)
 	switch v.kind {
@@ -142,7 +147,7 @@ func (s *Server) checkRequestIP(c *gin.Context) {
 	default:
 		resp.Status, resp.Message = "ok", "IP is not listed as risky."
 	}
-	c.IndentedJSON(http.StatusOK, resp)
+	return resp
 }
 
 // Proxy 待过滤的代理
