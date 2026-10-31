@@ -120,7 +120,7 @@ docker-compose up -d
 | `HONEYTRAP_BLOCK_THRESHOLD` | 触发软封的分数 | `16` |
 | `HONEYTRAP_BLOCK_WINDOW_SEC` | 等于封禁阈值的分数完全漏空所需时间(秒) | `60` |
 | `HONEYTRAP_BLOCK_DURATION_SEC` | 软封时长(秒) | `180` |
-| `HONEYTRAP_AFFECTS_VERDICT` | 被标记的来源是否在 `/api/v1/ip`、`/api/v2/*`、`/filter-proxies` 中判为风险（来源名 `honeytrap`）。默认关闭：客户端 IP 取自代理请求头，能绕过 CDN 直连源站的人可以伪造它，让任意 IP 被判为风险；只有确认源站无法直连时才打开。`CLUSTER_MODE=1` 时打开还必须设置 `HONEYTRAP_SECRET` | `false` |
+| `HONEYTRAP_AFFECTS_VERDICT` | 被标记的来源是否在 `/api/v1/ip`、`/api/v2/*`、`/filter-proxies` 中判为风险（来源名 `honeytrap`）。客户端 IP 取自代理请求头：源站须拒绝绕过 CDN 的直连请求（如 nginx 校验回源密钥），否则伪造请求头的人能让任意 IP 被判为风险，此时应设为 `false`。`CLUSTER_MODE=1` 时开启必须设置 `HONEYTRAP_SECRET` | `true` |
 | `HONEYTRAP_MAX_OFFENDERS` | 蜜罐最多跟踪的来源数；表满时淘汰最久未活动的来源 | `100000` |
 | `HONEYTRAP_SECRET` | 混淆蜜罐日志和标记文件中来源地址、以及封存命中蜜罐的访问日志行所用的密钥。未设置时使用随机密钥：来源标识和封存的日志行重启后无法还原，也不会写标记文件 | _(未设置)_ |
 | `HONEYTRAP_FLAG_FILE` | 保存被标记来源的文件（JSON Lines），使标记在重启后保留；需要同时设置 `HONEYTRAP_SECRET`。使用相同密钥并共用该文件的实例共享标记 | _(未设置；`compose.yaml` 中设为卷内路径)_ |
@@ -173,7 +173,7 @@ GET /api/v1/ip
 }
 ```
 
-`isRisky` 在命中风险列表时为 true；开启 `HONEYTRAP_AFFECTS_VERDICT` 后，被本服务蜜罐标记的来源（来源名为 `honeytrap`）同样为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
+`isRisky` 在命中风险列表或被本服务蜜罐标记（来源名为 `honeytrap`，可用 `HONEYTRAP_AFFECTS_VERDICT=false` 关闭）时为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
 
 ### 1.1 签名结果 (v2)
 ```bash
@@ -434,7 +434,7 @@ scripts/honeytrap-reveal.py --env-file .env app.log.1 app.log.2
 - **计分**: 每个来源一个漏桶。新路径按规则权重加分，桶内已出现过的路径只加0.25分，漏桶每秒漏掉 `HONEYTRAP_BLOCK_THRESHOLD / HONEYTRAP_BLOCK_WINDOW_SEC` 分。IPv4按单个地址计分，IPv6按/64计分
 - **分级响应**:
   - 命中规则即延迟（延迟随分数增长），并返回针对该路径生成的假内容。假凭据按来源唯一且保持不变
-  - 命中规则使分数达到标记阈值时，该来源在标记时长内被标记（单纯的 404 不会触发标记）。开启 `HONEYTRAP_AFFECTS_VERDICT` 后，`/api/v1/ip`、`/api/v2/*` 和 `/filter-proxies` 将被标记的来源判为风险（来源名 `honeytrap`）；已知CDN网段不会因此被判为风险
+  - 命中规则使分数达到标记阈值时，该来源在标记时长内被标记（单纯的 404 不会触发标记）。除非设置 `HONEYTRAP_AFFECTS_VERDICT=false`，`/api/v1/ip`、`/api/v2/*` 和 `/filter-proxies` 将被标记的来源判为风险（来源名 `honeytrap`）；已知CDN网段不会因此被判为风险
   - 达到封禁阈值后，该来源在封禁时长内访问规则路径和不存在的路径一律返回429；真实API路由不受影响
 - **多步欺骗**: 伪造的 WordPress、phpMyAdmin、通用后台和 Tomcat Manager（HTTP Basic）入口接受凭据提交。错误的凭据得到对应产品的常见错误页；提交的是本服务假内容里的凭据（如假 `.env` 中的 `DB_PASSWORD`、`ADMIN_PASSWORD`）时"登录成功"：发放假会话 Cookie，并展示伪造的后台页面
 - **假凭据回收**: 假凭据按来源生成，返回时登记（最多 50,000 个，先淘汰最早登记的）。在蜜罐路径上会检查查询串、`Cookie`、`Authorization` 以及最多 8 KiB 的请求体。命中时同时记录使用该凭据的来源和当初拿到它的来源，并且不论分数多少立即标记使用方。正在使用假凭据或假会话的来源只按重复计分，交互不会被封禁阈值打断
@@ -443,7 +443,7 @@ scripts/honeytrap-reveal.py --env-file .env app.log.1 app.log.2
 - **来源混淆**: 蜜罐日志和标记文件里不出现客户端地址。每个来源（IPv4地址或IPv6 /64）显示为一个32位的标识，由 `HONEYTRAP_SECRET` 派生的密钥加密得到。同一来源的标识始终相同，可以跨日志行、跨实例比对和关联。持有密钥时可以把标识还原为地址：`GET /api/honeytrap/flagged        # 本实例被标记的来源（混淆标识与到期时间）
 GET /api/honeytrap/source/{id}`（需要管理令牌）。
 - **访问日志封存**: 请求命中蜜罐规则时，它的访问日志行（`msg=request`）不再输出各个字段，而是整行加密成一个字符串 `sealed=<...>`，日志里任何地方都不再有这次请求的明文地址和路径。`POST /api/honeytrap/unseal`（需要管理令牌；请求体每行一个 sealed 值）返回原始字段。没有命中规则的请求照常记录。这能让读日志的人看不到地址；但它隐藏不了"哪些路径是陷阱"：规则表就在这个公开仓库里，而且 `honeytrap ...` 事件行本身写着路径和规则名
-- **蜜罐风险列表**: 被标记的来源保存在一张以混淆标识为键的列表中，开启 `HONEYTRAP_AFFECTS_VERDICT` 后风险判定会查询它。它不出现在公开的 `/api/export` 中，管理员可用 `GET /api/honeytrap/flagged` 查看。设置了 `HONEYTRAP_FLAG_FILE` 时，每个新标记追加写入该文件，启动时读回未到期的标记。`CLUSTER_MODE=1` 且设置了 `HONEYTRAP_SECRET` 时，新标记经 Redis 广播给所有实例（之后才启动的实例只能看到启动后产生的标记，以及标记文件中的标记）。更换密钥后，已有条目只是无法再匹配，不会错标到别的地址
+- **蜜罐风险列表**: 被标记的来源保存在一张以混淆标识为键的列表中，风险判定会查询它（`HONEYTRAP_AFFECTS_VERDICT=false` 时不查询）。它不出现在公开的 `/api/export` 中，管理员可用 `GET /api/honeytrap/flagged` 查看。设置了 `HONEYTRAP_FLAG_FILE` 时，每个新标记追加写入该文件，启动时读回未到期的标记。`CLUSTER_MODE=1` 且设置了 `HONEYTRAP_SECRET` 时，新标记经 Redis 广播给所有实例（之后才启动的实例只能看到启动后产生的标记，以及标记文件中的标记）。更换密钥后，已有条目只是无法再匹配，不会错标到别的地址
 - **自我保护**: 来源表有上限（优先淘汰最久未活动的来源，被标记的来源最后淘汰），同时处于延迟中的请求最多1024个
 - **状态**: 配置了标记文件时，标记在重启后保留。分数、软封和假凭据登记表只保存在内存中，各实例独立，重启后清空
 
@@ -604,7 +604,7 @@ spec:
 A: 不同数据源的更新频率和数据来源不同，建议综合多个结果判断。
 
 **Q: 蜜罐系统会影响正常用户吗？**  
-A: 正常API调用不会被延迟或封禁。只有请求规则表中的路径或不存在的路径才会计分，偶尔的几个404（如 `/favicon.ico`）远低于阈值。蜜罐标记只有在 `HONEYTRAP_AFFECTS_VERDICT=true` 时才影响风险判定；开启后被标记的来源对所有查询方都显示为风险，共享出口IP的用户会被一起影响。
+A: 正常API调用不会被延迟或封禁。只有请求规则表中的路径或不存在的路径才会计分，偶尔的几个404（如 `/favicon.ico`）远低于阈值。被标记的来源对所有查询方都显示为风险，共享出口IP的用户会被一起影响。
 
 **Q: 如何自定义风险IP列表？**  
 A: 可以通过修改`config.go`中的`ipListAPIs`添加自定义数据源。

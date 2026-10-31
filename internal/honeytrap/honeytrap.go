@@ -52,9 +52,8 @@ type Config struct {
 	MaxOffenders int // 最多跟踪的来源数，超出后淘汰最久未活动的来源
 
 	// AffectsVerdict 为 true 时，被标记的来源在 IP 风险判定中视为 risky（Risky 返回 true）。
-	// 默认关闭：客户端 IP 来自代理请求头，能直连源站的人可以伪造它，
-	// 打开后伪造者能让任意 IP 在 FlagDuration 内被判为风险 IP。
-	// 只有确认源站无法绕过 CDN 直连时才应打开
+	// 客户端 IP 来自代理请求头：源站必须拒绝绕过 CDN 的直连请求（例如 nginx 校验回源密钥），
+	// 否则伪造请求头的人能让任意 IP 在 FlagDuration 内被判为风险 IP，此时应关闭
 	AffectsVerdict bool
 
 	// Secret 混淆来源所用的密钥。为空时使用随机密钥：日志里的标识重启后无法还原，

@@ -26,7 +26,7 @@ type ResponseWithIP struct {
 	Status  string `json:"status"`
 	Message any    `json:"message,omitempty"`
 	IP      string `json:"ip,omitempty"`
-	IsRisky bool   `json:"isRisky"` // 命中风险列表（或开启 HONEYTRAP_AFFECTS_VERDICT 后被本服务蜜罐标记）时为 true；CDN/IDC 不算
+	IsRisky bool   `json:"isRisky"` // 命中风险列表或被本服务蜜罐标记（HONEYTRAP_AFFECTS_VERDICT，默认开启）时为 true；CDN/IDC 不算
 	IsIDC   bool   `json:"isIdc"`   // 数据中心/云主机，与 status 无关（风险 IP 也可能同时为 IDC）
 	IsProxy bool   `json:"isProxy"` // 代理/VPN/Tor/中继出口，含不判定为风险的公开代理列表
 }
@@ -78,7 +78,7 @@ func (s *Server) classify(ip string) verdict {
 	return v
 }
 
-// riskSource 返回 IP 的风险来源：优先风险列表，其次是被本服务蜜罐标记的来源（需开启 HONEYTRAP_AFFECTS_VERDICT）。
+// riskSource 返回 IP 的风险来源：优先风险列表，其次是被本服务蜜罐标记的来源（HONEYTRAP_AFFECTS_VERDICT，默认开启）。
 // CDN 回源网段不采信蜜罐标记：它们只会在客户端 IP 解析出错时被记到
 func (s *Server) riskSource(ip string) (string, bool) {
 	if source, ok := s.risk.Lookup(ip); ok {

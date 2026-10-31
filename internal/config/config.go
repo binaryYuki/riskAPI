@@ -147,7 +147,7 @@ func Load() Config {
 			BlockWindow:    time.Duration(envInt("HONEYTRAP_BLOCK_WINDOW_SEC", 60)) * time.Second,
 			BlockDuration:  time.Duration(envInt("HONEYTRAP_BLOCK_DURATION_SEC", 180)) * time.Second,
 			MaxOffenders:   envInt("HONEYTRAP_MAX_OFFENDERS", 100000),
-			AffectsVerdict: envBool("HONEYTRAP_AFFECTS_VERDICT", false),
+			AffectsVerdict: envBool("HONEYTRAP_AFFECTS_VERDICT", true),
 			Secret:         os.Getenv("HONEYTRAP_SECRET"),
 			FlagFile:       envString("HONEYTRAP_FLAG_FILE", ""),
 		},

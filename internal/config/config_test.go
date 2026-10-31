@@ -26,7 +26,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 8, cfg.Honeytrap.FlagThreshold)
 	assert.Equal(t, time.Hour, cfg.Honeytrap.FlagDuration)
 	assert.Equal(t, 0.2, cfg.Honeytrap.FakeOKProb)
-	assert.False(t, cfg.Honeytrap.AffectsVerdict)
+	assert.True(t, cfg.Honeytrap.AffectsVerdict)
 	assert.Empty(t, cfg.Honeytrap.Secret)
 	assert.Empty(t, cfg.Honeytrap.FlagFile)
 	assert.NotEmpty(t, cfg.Feeds)
