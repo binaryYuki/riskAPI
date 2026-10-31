@@ -11,6 +11,8 @@ import (
 const (
 	maxSeenPaths = 32 // 每个来源记住的不同路径数上限，超出后的新路径仍按全额计分
 	evictScan    = 8  // 表满时从最久未活动一端最多检查的记录数，优先淘汰未被标记的来源
+
+	scoreEpsilon = 1e-9 // 低于此值的分数视为已漏空
 )
 
 // sourceKey 把客户端 IP 归并为计分来源：IPv4 按单个地址，IPv6 按 /64
@@ -55,7 +57,8 @@ func (st *sourceStat) leak(now time.Time, perSec float64) {
 		st.score -= float64(secs) * perSec
 		st.leakedAt = st.leakedAt.Add(secs * time.Second)
 	}
-	if st.score <= 0 {
+	// 留出浮点误差：arm64 上乘减会被融合为 FMA，恰好漏空时可能剩下 1e-16 量级的余数
+	if st.score < scoreEpsilon {
 		st.score = 0
 		st.seen = st.seen[:0]
 	}
@@ -90,6 +93,16 @@ func newScorer(cfg scoreConfig) *scorer {
 
 // observe 为来源记一次命中：同一路径在桶内重复出现只按 repeatWeight 计分
 func (s *scorer) observe(key netip.Addr, pathHash uint64, weight float64, now time.Time) outcome {
+	return s.record(key, pathHash, weight, now, true)
+}
+
+// observeUnflagged 同 observe，但这次命中不会让来源被标记，只可能触发封禁。
+// 用于未命中规则的 404：它们只是弱信号（前端配错 URL 也会产生），不足以把来源判为风险
+func (s *scorer) observeUnflagged(key netip.Addr, pathHash uint64, weight float64, now time.Time) outcome {
+	return s.record(key, pathHash, weight, now, false)
+}
+
+func (s *scorer) record(key netip.Addr, pathHash uint64, weight float64, now time.Time, flaggable bool) outcome {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -120,7 +133,7 @@ func (s *scorer) observe(key netip.Addr, pathHash uint64, weight float64, now ti
 	st.score += weight
 	out.score = st.score
 
-	if st.score >= s.cfg.flagThreshold || st.score >= s.cfg.blockThreshold {
+	if flaggable && (st.score >= s.cfg.flagThreshold || st.score >= s.cfg.blockThreshold) {
 		out.newlyFlagged = !now.Before(st.flagUntil)
 		st.flagUntil = now.Add(s.cfg.flagDuration)
 		out.flagUntil = st.flagUntil

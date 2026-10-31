@@ -9,6 +9,7 @@ package honeytrap
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"hash/maphash"
 	"log/slog"
 	"math"
@@ -41,7 +42,7 @@ type Config struct {
 	EnableLog      bool
 
 	// 分级参数：分数达到 FlagThreshold 的来源被标记（Flagged 返回 true），
-	// 达到 BlockThreshold 的来源在 BlockDuration 内一律 429
+	// 达到 BlockThreshold 的来源在 BlockDuration 内访问蜜罐路径与 404 一律 429
 	FlagThreshold  int
 	FlagDuration   time.Duration
 	BlockThreshold int
@@ -49,6 +50,12 @@ type Config struct {
 	BlockDuration  time.Duration
 
 	MaxOffenders int // 最多跟踪的来源数，超出后淘汰最久未活动的来源
+
+	// AffectsVerdict 为 true 时，被标记的来源在 IP 风险判定中视为 risky（Risky 返回 true）。
+	// 默认关闭：客户端 IP 来自代理请求头，能直连源站的人可以伪造它，
+	// 打开后伪造者能让任意 IP 在 FlagDuration 内被判为风险 IP。
+	// 只有确认源站无法绕过 CDN 直连时才应打开
+	AffectsVerdict bool
 
 	// Secret 混淆来源所用的密钥。为空时使用随机密钥：日志里的标识重启后无法还原，
 	// 也不会写标记文件
@@ -82,7 +89,7 @@ func (cfg Config) withDefaults() Config {
 	if cfg.FlagThreshold <= 0 {
 		cfg.FlagThreshold = int(WeightHigh)
 	}
-	cfg.FlagThreshold = min(cfg.FlagThreshold, cfg.BlockThreshold) // 被封禁的来源必然已被标记
+	cfg.FlagThreshold = min(cfg.FlagThreshold, cfg.BlockThreshold) // 因命中规则而被封禁的来源必然已被标记
 	if cfg.FlagDuration <= 0 {
 		cfg.FlagDuration = time.Hour
 	}
@@ -193,7 +200,12 @@ func (t *Trap) Rules() *RuleSet {
 	return t.rules
 }
 
-// Flagged 判断 IP 所属来源当前是否在蜜罐的风险列表中，供风险判定使用；IPv6 按 /64 归并
+// Risky 判断 IP 是否因蜜罐标记而应在风险判定中视为 risky；未开启 AffectsVerdict 时始终为 false
+func (t *Trap) Risky(ip string) bool {
+	return t.cfg.AffectsVerdict && t.Flagged(ip)
+}
+
+// Flagged 判断 IP 所属来源当前是否在蜜罐的风险列表中；IPv6 按 /64 归并
 func (t *Trap) Flagged(ip string) bool {
 	if !t.cfg.Enabled {
 		return false
@@ -254,6 +266,45 @@ func (t *Trap) Reveal(source string) (string, bool) {
 		return netip.PrefixFrom(addr, 64).String(), true
 	}
 	return addr.String(), true
+}
+
+// ShareFlags 集群模式下与其它实例共享标记：新标记交给 publish 广播，
+// 其它实例广播来的标记由 HandlePeerFlag 并入。蜜罐关闭或未配置 Secret 时不共享
+// （没有共同的密钥，各实例的来源标识互不相同），返回是否已开启共享
+func (t *Trap) ShareFlags(publish func(payload []byte)) bool {
+	if !t.cfg.Enabled || t.cfg.Secret == "" {
+		return false
+	}
+	fn := func(rec flagRecord) {
+		payload, _ := json.Marshal(rec)
+		publish(payload)
+	}
+	t.flags.publish.Store(&fn)
+	return true
+}
+
+// HandlePeerFlag 并入其它实例广播的标记；格式不对或已到期的忽略，
+// 到期时间最多信任到 FlagDuration 之后
+func (t *Trap) HandlePeerFlag(payload []byte) {
+	if t.flags.publish.Load() == nil {
+		return
+	}
+	var rec flagRecord
+	now := time.Now()
+	if json.Unmarshal(payload, &rec) != nil || len(rec.Source) != 32 || !rec.Until.After(now) {
+		return
+	}
+	if _, ok := t.obf.reveal(rec.Source); !ok {
+		return
+	}
+	t.flags.set(rec.Source, minTime(rec.Until, now.Add(t.cfg.FlagDuration)), now, true)
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }
 
 // RunJanitor 定期清理不再需要跟踪的来源和已到期的标记，并读入其他实例写入标记文件的新标记；
@@ -329,7 +380,7 @@ func (t *Trap) Middleware(clientIP func(*gin.Context) string) gin.HandlerFunc {
 		if in.engaged() {
 			weight = min(weight, repeatWeight)
 		}
-		out := t.score(&h, weight)
+		out := t.score(&h, weight, true)
 		t.recordCredentials(h, in)
 		if t.reject(c, h, out) {
 			return
@@ -375,7 +426,7 @@ func (t *Trap) Middleware(clientIP func(*gin.Context) string) gin.HandlerFunc {
 	}
 }
 
-// NotFound 返回放在 NoRoute 链首的处理函数：未命中规则的 404 按低权重计分，
+// NotFound 返回放在 NoRoute 链首的处理函数：未命中规则的 404 按低权重计分（只计入封禁，不触发标记），
 // 来源处于封禁期时返回 429；其余情况交给后续处理函数输出 404
 func (t *Trap) NotFound(clientIP func(*gin.Context) string) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -383,17 +434,23 @@ func (t *Trap) NotFound(clientIP func(*gin.Context) string) gin.HandlerFunc {
 			return
 		}
 		h := t.newHit(c, clientIP(c), "not-found")
-		t.reject(c, h, t.score(&h, WeightLow))
+		t.reject(c, h, t.score(&h, WeightLow, false))
 	}
 }
 
 // score 为来源记一次命中，把分数写回事件，并在来源处于标记期时更新风险列表；
-// 无法解析的 IP 不计分
-func (t *Trap) score(h *hit, weight float64) outcome {
+// flaggable 为 false 时这次命中不会使来源被标记。无法解析的 IP 不计分
+func (t *Trap) score(h *hit, weight float64, flaggable bool) outcome {
 	if !h.ok {
 		return outcome{}
 	}
-	out := t.scores.observe(h.key, maphash.String(t.hashSeed, h.path), weight, h.ev.time)
+	hash := maphash.String(t.hashSeed, h.path)
+	var out outcome
+	if flaggable {
+		out = t.scores.observe(h.key, hash, weight, h.ev.time)
+	} else {
+		out = t.scores.observeUnflagged(h.key, hash, weight, h.ev.time)
+	}
 	h.ev.score = out.score
 	if !out.flagUntil.IsZero() {
 		t.flag(*h, out.flagUntil, out.newlyFlagged)

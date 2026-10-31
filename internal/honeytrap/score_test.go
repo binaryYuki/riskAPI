@@ -84,6 +84,20 @@ func TestScorer_LeaksOverTime(t *testing.T) {
 	assert.InDelta(t, 4-5*16.0/60+repeatWeight, out.score, 1e-9)
 }
 
+func TestScorer_UnflaggedHitsOnlyBlock(t *testing.T) {
+	s := testScorer()
+	src := netip.MustParseAddr("8.8.8.8")
+	now := time.Now()
+
+	var out outcome
+	for i := range 16 {
+		out = s.observeUnflagged(src, uint64(i), WeightLow, now)
+	}
+	assert.True(t, out.newlyBlocked)
+	assert.False(t, out.newlyFlagged)
+	assert.True(t, out.flagUntil.IsZero())
+}
+
 func TestScorer_FlagThenBlock(t *testing.T) {
 	s := testScorer()
 	src := netip.MustParseAddr("8.8.8.8")

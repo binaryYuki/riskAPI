@@ -166,8 +166,16 @@ func TestHoneytrap_ServesBaitInsteadOf403(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, env.do(http.MethodGet, "/wp-login.php", withRemote("9.9.9.9:1")).Code)
 }
 
-func TestHoneytrap_FlaggedSourceIsRisky(t *testing.T) {
+func TestHoneytrap_FlaggedSourceNotRiskyByDefault(t *testing.T) {
 	env := newTestEnv(t, trapConfig())
+	env.do(http.MethodGet, "/.git/config", withRemote("45.33.32.156:1"))
+	var resp ResponseWithIP
+	assert.NoError(t, json.Unmarshal(env.do(http.MethodGet, "/api/v1/ip/45.33.32.156", withRemote("9.9.9.9:1")).Body.Bytes(), &resp))
+	assert.False(t, resp.IsRisky, "honeytrap flags only affect the verdict with HONEYTRAP_AFFECTS_VERDICT")
+}
+
+func TestHoneytrap_FlaggedSourceIsRisky(t *testing.T) {
+	env := newTestEnv(t, trapConfig(func(c *honeytrap.Config) { c.AffectsVerdict = true }))
 	lookup := func(ip string) ResponseWithIP {
 		var resp ResponseWithIP
 		// 查询方用另一个来源，与被查询的 IP 无关
@@ -197,25 +205,24 @@ func TestHoneytrap_FlaggedSourceIsRisky(t *testing.T) {
 	assert.Equal(t, "cdn", lookup("104.16.0.1").Status)
 }
 
-func TestHoneytrap_ExportIncludesObfuscatedFlaggedSources(t *testing.T) {
-	env := newTestEnv(t, trapConfig(func(c *honeytrap.Config) { c.Secret = "test-secret" }))
-	assert.Equal(t, "# empty\n", env.do(http.MethodGet, "/api/export").Body.String())
-
+func TestHoneytrap_ExportExcludesFlaggedSources(t *testing.T) {
+	env := newTestEnv(t, trapConfig(func(c *honeytrap.Config) { c.Secret = "test-secret"; c.AffectsVerdict = true }))
 	env.do(http.MethodGet, "/.git/config", withRemote("45.33.32.156:1"))
 	id := honeytrapSourceID(t, "test-secret", "45.33.32.156")
 
-	// 风险表为空时，蜜罐来源也会导出
-	w := env.do(http.MethodGet, "/api/export")
-	assert.Regexp(t, `^# honeytrap `+id+` until \d{4}-\d\d-\d\dT[\d:]+Z$`, w.Body.String())
-	assert.Equal(t, "0", w.Header().Get("X-Total-Count"))
-	assert.Equal(t, "1", w.Header().Get("X-Honeytrap-Count"))
-
-	// 与风险 CIDR 一起导出时排在末尾，且不出现真实地址
+	// 公开导出只含风险 CIDR
+	assert.Equal(t, "# empty\n", env.do(http.MethodGet, "/api/export").Body.String())
 	env.setRisky(map[string]string{"203.0.113.0/24": "feed-a"})
-	w = env.do(http.MethodGet, "/api/export")
-	assert.Equal(t, "203.0.113.0/24 # feed-a\n# honeytrap "+id, strings.SplitN(w.Body.String(), " until ", 2)[0])
-	assert.NotContains(t, w.Body.String(), "45.33.32.156")
+	w := env.do(http.MethodGet, "/api/export")
+	assert.Equal(t, "203.0.113.0/24 # feed-a", w.Body.String())
 	assert.Equal(t, "1", w.Header().Get("X-Total-Count"))
+
+	// 管理接口列出被标记的来源
+	assert.Equal(t, http.StatusUnauthorized, env.do(http.MethodGet, "/api/honeytrap/flagged").Code)
+	w = env.do(http.MethodGet, "/api/honeytrap/flagged", asAdmin())
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), id)
+	assert.NotContains(t, w.Body.String(), "45.33.32.156")
 }
 
 func TestHoneytrap_AccessLogIsSealedOnRuleHits(t *testing.T) {

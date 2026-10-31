@@ -23,29 +23,11 @@ func (s *Server) metricsJSON(c *gin.Context) {
 func (s *Server) metricsPrometheus(c *gin.Context) {
 	var b strings.Builder
 	metric := func(name, typ, help string, value any, labels ...string) {
-		_, err := fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n", name, help, name, typ)
-		if err != nil {
-			if e := c.AbortWithError(http.StatusInternalServerError, err); e != nil {
-				s.log.Error("failed to write prometheus metrics", "error", e)
-			}
-			return
-		}
+		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n", name, help, name, typ)
 		if len(labels) > 0 {
-			_, err := fmt.Fprintf(&b, "%s{%s} %v\n", name, strings.Join(labels, ","), value)
-			if err != nil {
-				if e := c.AbortWithError(http.StatusInternalServerError, err); e != nil {
-					s.log.Error("failed to write prometheus metrics", "error", e)
-				}
-				return
-			}
+			fmt.Fprintf(&b, "%s{%s} %v\n", name, strings.Join(labels, ","), value)
 		} else {
-			_, err := fmt.Fprintf(&b, "%s %v\n", name, value)
-			if err != nil {
-				if e := c.AbortWithError(http.StatusInternalServerError, err); e != nil {
-					s.log.Error("failed to write prometheus metrics", "error", e)
-				}
-				return
-			}
+			fmt.Fprintf(&b, "%s %v\n", name, value)
 		}
 	}
 	boolGauge := func(v bool) int {

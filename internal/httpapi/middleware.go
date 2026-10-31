@@ -48,7 +48,7 @@ func (s *Server) requestLog(c *gin.Context) *slog.Logger {
 	return s.log.With("correlation_id", correlationID(c))
 }
 
-// requestLogger 记录访问日志；/.well-known/ 直接 404 且不记录。
+// requestLogger 记录访问日志；/.well-known/ 除验签公钥外直接 404 且不记录。
 // 命中蜜罐规则的请求整行封存为一个字符串（sealed），日志里不留明文地址和路径
 func (s *Server) requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {

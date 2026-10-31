@@ -235,6 +235,7 @@ func (s *Store) Update(ctx context.Context) bool {
 		feed := s.feeds[i]
 		switch {
 		case r.err == nil && r.notModified:
+			s.stats.addUnchanged(s.lastGood[feed.ID])
 			unchanged++
 		case r.err == nil:
 			s.lastGood[feed.ID] = r.data

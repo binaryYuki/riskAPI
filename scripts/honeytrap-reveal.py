@@ -3,7 +3,7 @@
 
 它是一个文本过滤器：逐行读入，把认得出的内容换成明文后原样输出，其余内容不动。
   - 来源标识（32 位十六进制）      -> IPv4 地址，或 IPv6 的 /64 网段
-    出现在：蜜罐事件日志的 source / issued_to、标记文件、/api/export 的 "# honeytrap" 行
+    出现在：蜜罐事件日志的 source / issued_to、标记文件、/api/honeytrap/flagged 的输出
   - 访问日志中封存的行（sealed）  -> 原始字段（method、path、status、latency、client_ip、correlation_id）
 
 密钥从环境变量 HONEYTRAP_SECRET 读取，或用 --env-file 指向部署所用的 .env；
@@ -15,7 +15,7 @@
   export HONEYTRAP_SECRET=...            # 或加 --env-file .env
   docker compose logs --no-log-prefix server | scripts/honeytrap-reveal.py
   scripts/honeytrap-reveal.py honeytrap-flagged.jsonl
-  curl -s https://example.com/api/export | grep '^# honeytrap' | scripts/honeytrap-reveal.py
+  curl -s -H "Authorization: Bearer $ADMIN_TOKEN" https://example.com/api/honeytrap/flagged | scripts/honeytrap-reveal.py
 
 依赖：Python 3.8+ 和 cryptography 包（pip install cryptography）。
 算法与 internal/honeytrap/obfuscate.go 一致，那边改动时这里要同步。

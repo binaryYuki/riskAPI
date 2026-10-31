@@ -42,6 +42,8 @@ type validator struct {
 type feedData struct {
 	prefixes  []netip.Prefix
 	cidrs     int       // prefixes 中源里写成 CIDR 形式的条数，其余为单 IP
+	lines     int       // 解析过的行数（含不合法的行）
+	special   int       // prefixes 中属于特殊网段的条数
 	validator validator // 该次响应的校验值，下次抓取时用于条件请求
 }
 
@@ -136,6 +138,7 @@ func (s *Store) fetchOnce(ctx context.Context, client *http.Client, feed Feed, c
 // 全链路只在此处解析一次：解析成功即为合法，统计与后续建表都直接使用解析结果。
 func (s *Store) parseLine(line string, d *feedData) {
 	s.stats.totalLines.Add(1)
+	d.lines++
 	// 带 zone 的地址（fe80::1%eth0）不是可路由的公网地址，不接受
 	if strings.Contains(line, "%") {
 		return
@@ -146,7 +149,9 @@ func (s *Store) parseLine(line string, d *feedData) {
 	}
 	// 解析后 "1.2.3.4" 与 "1.2.3.4/32" 是同一个前缀，写法只能在这里区分
 	cidr := strings.Contains(line, "/")
-	s.stats.classify(p, cidr)
+	if s.stats.classify(p, cidr) {
+		d.special++
+	}
 	d.add(p, cidr)
 }
 

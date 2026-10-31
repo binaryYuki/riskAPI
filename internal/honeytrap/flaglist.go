@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,18 +24,21 @@ type flagRecord struct {
 }
 
 type flagEntry struct {
-	until     time.Time
-	persisted time.Time // 已写入文件的到期时间
+	until  time.Time
+	shared time.Time // 已写入文件 / 已广播给其它实例的到期时间
 }
 
 // flagList 蜜罐自己的风险列表：混淆后的来源 → 标记到期时间。
 // 配置了文件时，新标记追加写入文件，启动时读回；多个实例共用同一个文件时，
-// 各实例定期读取文件中新增的行，从而看到彼此的标记
+// 各实例定期读取文件中新增的行，从而看到彼此的标记。
+// 设置了 publish 时（集群模式），新标记同时广播给其它实例
 type flagList struct {
 	max     int
-	refresh time.Duration // 内存中的到期时间比文件中的晚这么多时，再写一行
+	refresh time.Duration // 内存中的到期时间比已共享的晚这么多时，再写一行 / 再广播一次
 	path    string        // 为空时只在内存中
 	log     *slog.Logger
+
+	publish atomic.Pointer[func(flagRecord)] // 为 nil 时不广播
 
 	mu      sync.RWMutex
 	entries map[string]*flagEntry
@@ -47,17 +51,23 @@ func newFlagList(path string, max int, refresh time.Duration, log *slog.Logger) 
 	return &flagList{max: max, refresh: refresh, path: path, log: log, entries: make(map[string]*flagEntry)}
 }
 
-// flag 标记来源到 until，必要时写入文件
+// flag 标记来源到 until，必要时写入文件并广播
 func (f *flagList) flag(source string, until time.Time, now time.Time) {
 	if !f.set(source, until, now, false) {
 		return
 	}
-	f.appendRecord(flagRecord{Source: source, Until: until})
+	rec := flagRecord{Source: source, Until: until}
+	if f.path != "" {
+		f.appendRecord(rec)
+	}
+	if publish := f.publish.Load(); publish != nil {
+		(*publish)(rec)
+	}
 }
 
-// set 更新内存中的到期时间（只延后不提前），返回是否需要写入文件。
-// fromFile 表示这条记录来自文件，本身已经落盘
-func (f *flagList) set(source string, until, now time.Time, fromFile bool) (persist bool) {
+// set 更新内存中的到期时间（只延后不提前），返回是否需要写入文件 / 广播。
+// shared 表示这条记录来自文件或其它实例，已经共享过
+func (f *flagList) set(source string, until, now time.Time, shared bool) (propagate bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	e := f.entries[source]
@@ -74,16 +84,16 @@ func (f *flagList) set(source string, until, now time.Time, fromFile bool) (pers
 	if until.After(e.until) {
 		e.until = until
 	}
-	if fromFile {
-		if until.After(e.persisted) {
-			e.persisted = until
+	if shared {
+		if until.After(e.shared) {
+			e.shared = until
 		}
 		return false
 	}
-	if f.path == "" || e.until.Sub(e.persisted) < f.refresh {
+	if f.path == "" && f.publish.Load() == nil || e.until.Sub(e.shared) < f.refresh {
 		return false
 	}
-	e.persisted = e.until
+	e.shared = e.until
 	return true
 }
 

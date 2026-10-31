@@ -70,9 +70,17 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	}
 }
 
-// classify 统计单个合法条目：单 IP / CIDR，以及是否属于特殊网段。
+// addUnchanged 把未变化（304）的源上次解析时的统计计入本轮，使各项统计不因源未变化而变小
+func (s *Stats) addUnchanged(d *feedData) {
+	s.totalLines.Add(int64(d.lines))
+	s.parsedIPs.Add(int64(len(d.prefixes) - d.cidrs))
+	s.parsedCIDRs.Add(int64(d.cidrs))
+	s.specialRanges.Add(int64(d.special))
+}
+
+// classify 统计单个合法条目：单 IP / CIDR，以及是否属于特殊网段（返回值）。
 // cidr 表示源里写成带掩码的形式，"1.2.3.4/32" 也按 CIDR 计。
-func (s *Stats) classify(p netip.Prefix, cidr bool) {
+func (s *Stats) classify(p netip.Prefix, cidr bool) (special bool) {
 	if !cidr {
 		s.parsedIPs.Add(1)
 	} else {
@@ -81,5 +89,7 @@ func (s *Stats) classify(p netip.Prefix, cidr bool) {
 	// 取网络地址第一个 IP 判断特殊网段
 	if ipset.IsSpecial(p.Addr()) {
 		s.specialRanges.Add(1)
+		return true
 	}
+	return false
 }

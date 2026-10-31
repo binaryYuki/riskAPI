@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // fastCfg 延迟压到 1ms 的启用配置；默认总是返回伪造内容
@@ -232,16 +234,75 @@ func TestNotFound_ScoresProbing(t *testing.T) {
 	}
 	assert.False(t, trap.Flagged("1.1.1.1"))
 
-	// 短时间内探测多个不同的不存在路径会被标记，继续探测则被封禁
+	// 404 只是弱信号：短时间内探测多个不同的不存在路径也不会被标记，但继续探测会被封禁
 	for i := range 8 {
 		assert.Equal(t, "real 404", get(r, fmt.Sprintf("/probe/%d", i), "2.2.2.2:1").Body.String())
 	}
-	assert.True(t, trap.Flagged("2.2.2.2"))
+	assert.False(t, trap.Flagged("2.2.2.2"), "404s alone never flag a source")
 	for i := 8; i < 16; i++ {
 		get(r, fmt.Sprintf("/probe/%d", i), "2.2.2.2:1")
 	}
 	assert.Equal(t, http.StatusTooManyRequests, get(r, "/probe/x", "2.2.2.2:1").Code)
+	assert.False(t, trap.Flagged("2.2.2.2"))
 	assert.Zero(t, trap.Stats().Hits, "plain 404s are scored but not tarpitted")
+
+	// 积累的 404 分数在命中规则后才会让来源被标记
+	for i := range 6 {
+		get(r, fmt.Sprintf("/probe/%d", i), "3.3.3.3:1")
+	}
+	assert.False(t, trap.Flagged("3.3.3.3"))
+	get(r, "/wp-login.php", "3.3.3.3:1")
+	assert.True(t, trap.Flagged("3.3.3.3"))
+}
+
+func TestRisky_RequiresAffectsVerdict(t *testing.T) {
+	cfg := fastCfg()
+	trap, r := newTestTrap(cfg)
+	get(r, "/.env", "8.8.8.8:1")
+	assert.True(t, trap.Flagged("8.8.8.8"))
+	assert.False(t, trap.Risky("8.8.8.8"), "flags stay out of the verdict by default")
+
+	cfg.AffectsVerdict = true
+	trap, r = newTestTrap(cfg)
+	get(r, "/.env", "8.8.8.8:1")
+	assert.True(t, trap.Risky("8.8.8.8"))
+	assert.False(t, trap.Risky("9.9.9.9"))
+}
+
+func TestShareFlags_BroadcastsAndMergesPeerFlags(t *testing.T) {
+	cfg := fastCfg()
+	cfg.Secret = "cluster-secret"
+	a, ra := newTestTrap(cfg)
+	b, _ := newTestTrap(cfg)
+
+	var sent [][]byte
+	require.True(t, a.ShareFlags(func(p []byte) { sent = append(sent, p) }))
+	require.True(t, b.ShareFlags(func([]byte) {}))
+
+	get(ra, "/.env", "8.8.8.8:1")
+	require.Len(t, sent, 1)
+	get(ra, "/.git/config", "8.8.8.8:1")
+	assert.Len(t, sent, 1, "extending a flag within the refresh window is not re-broadcast")
+
+	assert.False(t, b.Flagged("8.8.8.8"))
+	b.HandlePeerFlag(sent[0])
+	assert.True(t, b.Flagged("8.8.8.8"))
+
+	// 格式不对、已到期或不是用同一密钥生成的标识一律忽略
+	b.HandlePeerFlag([]byte("garbage"))
+	b.HandlePeerFlag([]byte(`{"source":"00000000000000000000000000000000","until":"2999-01-01T00:00:00Z"}`))
+	b.HandlePeerFlag([]byte(`{"source":"` + b.obf.hide(netip.MustParseAddr("1.2.3.4")) + `","until":"2000-01-01T00:00:00Z"}`))
+	assert.Equal(t, 1, b.Stats().Flagged)
+
+	// 远端给出的到期时间最多信任到 FlagDuration 之后
+	b.HandlePeerFlag([]byte(`{"source":"` + b.obf.hide(netip.MustParseAddr("5.6.7.8")) + `","until":"2999-01-01T00:00:00Z"}`))
+	for _, f := range b.FlaggedSources() {
+		assert.False(t, f.Until.After(time.Now().Add(time.Hour+time.Second)), "default FlagDuration is one hour")
+	}
+
+	// 没有共同密钥时不共享
+	noSecret, _ := newTestTrap(fastCfg())
+	assert.False(t, noSecret.ShareFlags(func([]byte) {}))
 }
 
 func TestDelay_CapsConcurrentSleepers(t *testing.T) {

@@ -130,6 +130,7 @@ func TestUpdate_ConditionalRequests(t *testing.T) {
 	s.Update(context.Background())
 	assert.Equal(t, int32(1), full.Load())
 	assert.True(t, isRisky(s, "5.5.5.9"))
+	parsed := s.Stats()
 
 	// 源未变化：304，沿用上次数据，且不计为失败
 	s.Update(context.Background())
@@ -138,6 +139,10 @@ func TestUpdate_ConditionalRequests(t *testing.T) {
 	assert.True(t, isRisky(s, "5.5.5.9"))
 	assert.Equal(t, 0, s.Stats().FetchFailures)
 	assert.Equal(t, 1, s.Stats().FetchAttempts)
+	// 解析统计沿用上次解析的结果，不因源未变化而归零
+	assert.Equal(t, parsed.TotalLines, s.Stats().TotalLines)
+	assert.Equal(t, parsed.ParsedCIDRs, s.Stats().ParsedCIDRs)
+	assert.Equal(t, 1, s.Stats().ParsedCIDRs)
 
 	// 清空后即使源返回 304 也要把表重建回来
 	s.Clear()
