@@ -117,12 +117,11 @@ func (s *Server) Handler() *gin.Engine {
 	r.Use(s.sensitivePath())
 
 	s.routes(r)
-	s.trap.RegisterDecoys(r)
 	return r
 }
 
 func (s *Server) routes(r *gin.Engine) {
-	r.NoRoute(s.notFound)
+	r.NoRoute(s.trap.NotFound(s.clientIP), s.notFound)
 	r.GET("/", s.home)
 
 	// IP 风险检测
@@ -160,11 +159,17 @@ func (s *Server) routes(r *gin.Engine) {
 	r.GET("/api/export", s.exportCIDRs)
 
 	// 管理接口：需 Authorization: Bearer <ADMIN_TOKEN>
+	// （/api/honeytrap/flagged 列出被蜜罐标记的来源，
+	//   /api/honeytrap/source/:id 把蜜罐日志中混淆的来源还原为地址，
+	//   /api/honeytrap/unseal 还原访问日志中被封存的行）
 	admin := r.Group("/api/cache", adminAuth(s.cfg.AdminToken))
 	{
 		admin.GET("/flush", s.flushIndex)
 		admin.POST("/flush/:method/*range", s.flush)
 	}
+	r.GET("/api/honeytrap/flagged", adminAuth(s.cfg.AdminToken), s.flaggedSources)
+	r.GET("/api/honeytrap/source/:id", adminAuth(s.cfg.AdminToken), s.revealSource)
+	r.POST("/api/honeytrap/unseal", adminAuth(s.cfg.AdminToken), s.unsealLines)
 }
 
 // cors v2 接口与公钥对任意来源开放（不带凭据，* 是安全的），其余路径使用白名单配置

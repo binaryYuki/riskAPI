@@ -141,11 +141,15 @@ func Load() Config {
 			MaxPenaltyMS:   envInt("HONEYTRAP_MAX_PENALTY_MS", 1200),
 			FakeOKProb:     envFloat("HONEYTRAP_FAKEOK", 0.2),
 			EnableLog:      envBool("HONEYTRAP_LOG", true),
-			Decoys:         envBool("HONEYTRAP_DECOYS", false),
+			FlagThreshold:  envInt("HONEYTRAP_FLAG_THRESHOLD", 8),
+			FlagDuration:   time.Duration(envInt("HONEYTRAP_FLAG_DURATION_SEC", 3600)) * time.Second,
 			BlockThreshold: envInt("HONEYTRAP_BLOCK_THRESHOLD", 16),
 			BlockWindow:    time.Duration(envInt("HONEYTRAP_BLOCK_WINDOW_SEC", 60)) * time.Second,
 			BlockDuration:  time.Duration(envInt("HONEYTRAP_BLOCK_DURATION_SEC", 180)) * time.Second,
 			MaxOffenders:   envInt("HONEYTRAP_MAX_OFFENDERS", 100000),
+			AffectsVerdict: envBool("HONEYTRAP_AFFECTS_VERDICT", true),
+			Secret:         os.Getenv("HONEYTRAP_SECRET"),
+			FlagFile:       envString("HONEYTRAP_FLAG_FILE", ""),
 		},
 
 		RiskToken: RiskTokenConfig{

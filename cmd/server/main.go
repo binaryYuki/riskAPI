@@ -89,9 +89,9 @@ func run(cfg config.Config, tel *telemetry.Telemetry) error {
 	}
 	go risk.Run(ctx, cfg.FeedUpdateInterval)
 
-	trap := honeytrap.New(cfg.Honeytrap, log)
-	if cfg.Honeytrap.Enabled {
-		go trap.RunJanitor(ctx)
+	trap, err := newTrap(ctx, cfg, sh, log)
+	if err != nil {
+		return err
 	}
 
 	signer, err := newSigner(cfg.RiskToken)
@@ -178,6 +178,38 @@ func openCluster(ctx context.Context, cfg config.Config, log *slog.Logger) (*sha
 		return nil, fmt.Errorf("REDIS_URL: %w", err)
 	}
 	return sh, nil
+}
+
+// newTrap 创建蜜罐。集群模式下被标记的来源通过 Redis 广播给其它实例，否则多副本的风险判定会因 Pod 而异；
+// 广播需要各实例使用相同的 HONEYTRAP_SECRET。蜜罐标记参与风险判定却无法在实例间共享时启动失败
+func newTrap(ctx context.Context, cfg config.Config, sh *shared.Client, log *slog.Logger) (*honeytrap.Trap, error) {
+	hc := cfg.Honeytrap
+	if hc.Enabled && hc.AffectsVerdict && sh != nil && hc.Secret == "" {
+		return nil, errors.New("HONEYTRAP_AFFECTS_VERDICT=1 with CLUSTER_MODE=1 requires HONEYTRAP_SECRET (shared by all instances)")
+	}
+	trap := honeytrap.New(hc, log)
+	if !hc.Enabled {
+		return trap, nil
+	}
+	go trap.RunJanitor(ctx)
+	if sh == nil {
+		return trap, nil
+	}
+	bus := sh.Bus("honeytrap")
+	sharing := trap.ShareFlags(func(payload []byte) {
+		// 广播在后台进行，Redis 故障时不拖慢请求；消息丢失只影响其它实例，本实例的标记不受影响
+		go func() {
+			if err := bus.Publish(context.WithoutCancel(ctx), payload); err != nil {
+				log.Warn("honeytrap flag broadcast failed", "err", err)
+			}
+		}()
+	})
+	if sharing {
+		go bus.Run(ctx, trap.HandlePeerFlag)
+	} else {
+		log.Warn("honeytrap flags are not shared across instances without HONEYTRAP_SECRET")
+	}
+	return trap, nil
 }
 
 // newIPSBLimiter 集群模式下所有实例共享 IPSB_RATE_PER_SEC，Redis 不可用时每个实例按 IPSB_FALLBACK_RATE_PER_SEC；

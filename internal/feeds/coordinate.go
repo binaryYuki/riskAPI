@@ -6,7 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
+
+	"risky_ip_filter/internal/ipset"
 )
 
 const (
@@ -155,19 +158,26 @@ func (s *Store) applySnapshot(snap snapshot) bool {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
 
-	lastGood := make(map[string][]Entry, len(snap.Feeds))
+	lastGood := make(map[string]*feedData, len(snap.Feeds))
 	var batches []batch
 	for _, feed := range s.feeds {
 		values, ok := snap.Feeds[feed.ID]
 		if !ok {
 			continue
 		}
-		entries := make([]Entry, len(values))
-		for i, v := range values {
-			entries[i] = Entry{Value: v, Source: feed.ID}
+		data := &feedData{}
+		for _, v := range values {
+			p, ok := ipset.ParseEntry(v)
+			if !ok {
+				continue
+			}
+			data.add(p, strings.Contains(v, "/"))
 		}
-		lastGood[feed.ID] = entries
-		batches = append(batches, batch{entries: entries, tags: feed.Tags, tagOnly: feed.TagOnly})
+		if len(data.prefixes) == 0 {
+			continue
+		}
+		lastGood[feed.ID] = data
+		batches = append(batches, batch{source: feed.ID, data: data, tags: feed.Tags, tagOnly: feed.TagOnly})
 	}
 	if len(batches) == 0 {
 		return false
@@ -183,10 +193,14 @@ func (s *Store) applySnapshot(snap snapshot) bool {
 func (s *Store) encodeSnapshot() ([]byte, error) {
 	s.updateMu.Lock()
 	snap := snapshot{Version: snapshotVersion, Feeds: make(map[string][]string, len(s.lastGood)), Stats: s.stats.Snapshot()}
-	for id, entries := range s.lastGood {
-		values := make([]string, len(entries))
-		for i, e := range entries {
-			values[i] = e.Value
+	for id, data := range s.lastGood {
+		values := make([]string, len(data.prefixes))
+		for i, p := range data.prefixes {
+			if p.Bits() == p.Addr().BitLen() {
+				values[i] = p.Addr().String()
+			} else {
+				values[i] = p.String()
+			}
 		}
 		snap.Feeds[id] = values
 	}
