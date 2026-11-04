@@ -26,9 +26,11 @@ type ResponseWithIP struct {
 	Status  string `json:"status"`
 	Message any    `json:"message,omitempty"`
 	IP      string `json:"ip,omitempty"`
-	IsRisky bool   `json:"isRisky"` // 命中风险列表或被本服务蜜罐标记（HONEYTRAP_AFFECTS_VERDICT，默认开启）时为 true；CDN/IDC 不算
+	IsRisky bool   `json:"isRisky"` // 命中风险列表或被本服务蜜罐标记（HONEYTRAP_AFFECTS_VERDICT，默认开启）时为 true；CDN/IDC/可信来源不算
 	IsIDC   bool   `json:"isIdc"`   // 数据中心/云主机，与 status 无关（风险 IP 也可能同时为 IDC）
 	IsProxy bool   `json:"isProxy"` // 代理/VPN/Tor/中继出口，含不判定为风险的公开代理列表
+	// TrustedBot 命中的可信来源（官方公布的爬虫/监控/支付回调网段，如 googlebot），未命中时省略
+	TrustedBot string `json:"isTrustedBot,omitempty"`
 }
 
 // handleError 返回错误响应并中止后续处理
@@ -50,10 +52,11 @@ const (
 )
 
 type verdict struct {
-	kind    verdictKind
-	detail  string // 风险来源或提供商
-	isIDC   bool   // 独立于 kind 的属性标记
-	isProxy bool
+	kind       verdictKind
+	detail     string // 风险来源或提供商
+	isIDC      bool   // 独立于 kind 的属性标记
+	isProxy    bool
+	trustedBot string // 命中的可信来源，非空时 kind 不会是 risky
 }
 
 // classify 按优先级判定 IP 类别并计算属性标记；调用方需先校验 IP 格式
@@ -63,10 +66,12 @@ func (s *Server) classify(ip string) verdict {
 	}
 	tags := s.risk.Tags(ip)
 	idcProvider, inIDC := s.lists.IDC(ip)
+	bot, _ := s.risk.Trusted(ip)
 	v := verdict{
-		kind:    verdictClean,
-		isIDC:   inIDC || tags&feeds.TagIDC != 0,
-		isProxy: tags&feeds.TagProxy != 0 || (inIDC && netlists.IsProxyProvider(idcProvider)),
+		kind:       verdictClean,
+		isIDC:      inIDC || tags&feeds.TagIDC != 0,
+		isProxy:    tags&feeds.TagProxy != 0 || (inIDC && netlists.IsProxyProvider(idcProvider)),
+		trustedBot: bot,
 	}
 	if source, ok := s.riskSource(ip); ok {
 		v.kind, v.detail = verdictRisky, source
@@ -79,8 +84,13 @@ func (s *Server) classify(ip string) verdict {
 }
 
 // riskSource 返回 IP 的风险来源：优先风险列表，其次是被本服务蜜罐标记的来源（HONEYTRAP_AFFECTS_VERDICT，默认开启）。
+// 可信来源一律不判定为风险：机房类风险源会整段命中官方爬虫网段，而 TCP 来源地址无法伪造，
+// 可信网段触发蜜罐只可能是爬虫顺着链接抓到了诱饵路径。
 // CDN 回源网段不采信蜜罐标记：它们只会在客户端 IP 解析出错时被记到
 func (s *Server) riskSource(ip string) (string, bool) {
+	if _, trusted := s.risk.Trusted(ip); trusted {
+		return "", false
+	}
 	if source, ok := s.risk.Lookup(ip); ok {
 		return source, true
 	}
@@ -94,7 +104,7 @@ func (s *Server) riskSource(ip string) (string, bool) {
 
 // newIPResponse 由判定结果填充布尔字段，Status/Message 由调用方设置
 func newIPResponse(ip string, v verdict) ResponseWithIP {
-	return ResponseWithIP{IP: ip, IsRisky: v.kind == verdictRisky, IsIDC: v.isIDC, IsProxy: v.isProxy}
+	return ResponseWithIP{IP: ip, IsRisky: v.kind == verdictRisky, IsIDC: v.isIDC, IsProxy: v.isProxy, TrustedBot: v.trustedBot}
 }
 
 // checkIP GET/POST /api/v1/ip/:ip 检查指定 IP
@@ -239,10 +249,11 @@ func (s *Server) ready(c *gin.Context) {
 	c.IndentedJSON(http.StatusOK, Response{
 		Status: "ok",
 		Message: gin.H{
-			"version":       s.version,
-			"risk_prefixes": s.risk.Snapshot().Len(),
-			"cdn_prefixes":  cdn,
-			"idc_prefixes":  idc,
+			"version":          s.version,
+			"risk_prefixes":    s.risk.Snapshot().Len(),
+			"trusted_prefixes": s.risk.TrustedLen(),
+			"cdn_prefixes":     cdn,
+			"idc_prefixes":     idc,
 		},
 	})
 }

@@ -30,10 +30,12 @@ type Claims struct {
 	IsRisky bool   `json:"isRisky"`
 	IsIDC   bool   `json:"isIdc"`
 	IsProxy bool   `json:"isProxy"`
-	Aud     string `json:"aud"`   // 接入站点域名，防止跨站使用
-	Nonce   string `json:"nonce"` // 接入站点下发的一次性随机串，防重放
-	Iat     int64  `json:"iat"`
-	Exp     int64  `json:"exp"`
+	// TrustedBot 命中的可信来源（如 googlebot），未命中时省略，因此不影响普通访客的 payload
+	TrustedBot string `json:"isTrustedBot,omitempty"`
+	Aud        string `json:"aud"`   // 接入站点域名，防止跨站使用
+	Nonce      string `json:"nonce"` // 接入站点下发的一次性随机串，防重放
+	Iat        int64  `json:"iat"`
+	Exp        int64  `json:"exp"`
 }
 
 // PublicKey 按 kid 公布的公钥

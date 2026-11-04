@@ -130,6 +130,11 @@ func (s *Store) fetchOnce(ctx context.Context, client *http.Client, feed Feed, c
 	if len(data.prefixes) == 0 {
 		return fetched{}, errEmptySource
 	}
+	if feed.Trusted {
+		if err := checkTrusted(data); err != nil {
+			return fetched{}, err
+		}
+	}
 	data.validator = validator{etag: resp.Header.Get("ETag"), lastModified: resp.Header.Get("Last-Modified")}
 	return fetched{data: data}, nil
 }

@@ -31,6 +31,16 @@ type Feed struct {
 	Tags   Tag
 	// TagOnly 只贡献 Tags，不进入风险表（误报高或本身不代表恶意，如公开代理列表）
 	TagOnly bool
+	// Trusted 可信来源（官方公布的爬虫/监控/支付回调网段）：只进入可信表，命中的 IP 不判定为风险，
+	// ID 作为 isTrustedBot 返回。入表前经 checkTrusted 校验，Tags/TagOnly 不生效
+	Trusted bool
+}
+
+// trustedListBase 可信网段镜像：sefinek/trusted-ips-whitelist 每 6 小时从各厂商官方地址同步并归一化为纯文本
+const trustedListBase = "https://raw.githubusercontent.com/sefinek/trusted-ips-whitelist/main/lists/"
+
+func trusted(id string) Feed {
+	return Feed{ID: id, URL: trustedListBase + id + "/ips.txt", Trusted: true}
 }
 
 // DefaultFeeds 默认数据源。合并时按此顺序进行，同一前缀出现在多个源时后者的 ID 生效。
@@ -75,4 +85,25 @@ var DefaultFeeds = []Feed{
 	{ID: "public-proxy-speedx-http", URL: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", Format: FormatHostPort, Tags: TagProxy, TagOnly: true},
 	{ID: "public-proxy-speedx-socks4", URL: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt", Format: FormatHostPort, Tags: TagProxy, TagOnly: true},
 	{ID: "public-proxy-speedx-socks5", URL: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", Format: FormatHostPort, Tags: TagProxy, TagOnly: true},
+
+	// 可信来源：只收录厂商官方公布、专属于该服务的网段。未收录：
+	// 代用户抓取的 fetcher（google-user-triggered-fetchers、chatgpt-user、perplexity-user、webpagetestbot）本质是代理；
+	// 按 ASN 推算的整段（facebookbot、baidu、semrush 等）与 yandexbot（含 Yandex Cloud 租户网段）范围过大；
+	// 扫描器（shodan、censys、modat）确有扫描行为；CDN/DNS 已由 data/cdn 覆盖
+	trusted("googlebot"),
+	trusted("google-special-crawlers"),
+	trusted("bingbot"),
+	trusted("applebot"),
+	trusted("duckduckbot"),
+	trusted("gptbot"),
+	trusted("oai-searchbot"),
+	trusted("claudebot"),
+	trusted("perplexitybot"),
+	trusted("uptimerobot"),
+	trusted("pingdombot"),
+	trusted("betterstack"),
+	trusted("pulsetic"),
+	trusted("stripewebhook"),
+	trusted("paypal"),
+	trusted("paddle"),
 }

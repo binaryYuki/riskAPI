@@ -178,6 +178,13 @@ GET /api/v1/ip
 
 `isRisky` is true for risk-list hits, and (unless `HONEYTRAP_AFFECTS_VERDICT=false`) for sources flagged by this service's own honeypot (reported with source `honeytrap`). `isIdc` / `isProxy` are independent flags: `isIdc` covers data/idc cloud ranges and datacenter feeds; `isProxy` covers VPN/Tor/iCloud Private Relay and public proxy lists (public proxies only set the flag, they do not make an IP risky).
 
+`isTrustedBot` appears only for trusted sources and holds the provider name (e.g. `googlebot`, `bingbot`, `stripewebhook`). Trusted sources are the officially published ranges of search/AI crawlers, uptime monitors and payment webhooks; a hit always yields `isRisky: false` (datacenter risk feeds and honeypot flags are ignored), while `status` and `isIdc` / `isProxy` are reported as usual:
+
+```json
+{ "status": "idc", "message": "IP belongs to IDC: gcp", "ip": "34.22.85.1",
+  "isRisky": false, "isIdc": true, "isProxy": false, "isTrustedBot": "googlebot" }
+```
+
 ### 1.1 Signed Results (v2)
 ```bash
 # Requester IP verdict, signed
@@ -190,7 +197,7 @@ GET /api/v2/info?aud={site host}&nonce={one-time random string}
 GET /.well-known/risk-keys.json
 ```
 
-The browser calls v2 and forwards `token` unchanged to the integrating site's backend, which verifies it with the published public key, so tampering with any field invalidates the signature. v2 responses are the v1 bodies plus `token` (`/api/v2/info` also carries `isRisky` / `isIdc` / `isProxy`):
+The browser calls v2 and forwards `token` unchanged to the integrating site's backend, which verifies it with the published public key, so tampering with any field invalidates the signature. v2 responses are the v1 bodies plus `token` (`/api/v2/info` also carries `isRisky` / `isIdc` / `isProxy` / `isTrustedBot`):
 
 ```json
 {
@@ -207,7 +214,7 @@ The signature covers the ASCII bytes of the first segment (both segments unpadde
   "aud": "gdue-ca.paperee.guru", "nonce": "…", "iat": 1791979000, "exp": 1791979120 }
 ```
 
-The verifier must check: signature (key chosen by `kid`), `exp`, `aud` equals its own host, `nonce` equals the one it issued and has not been used, and `ip` matches the visitor IP it sees (compare IPv6 by /64).
+For trusted sources the payload carries an extra `"isTrustedBot": "googlebot"` after `isProxy`; otherwise it is omitted. The verifier must check: signature (key chosen by `kid`), `exp`, `aud` equals its own host, `nonce` equals the one it issued and has not been used, and `ip` matches the visitor IP it sees (compare IPv6 by /64).
 
 - `aud` and `nonce` are optional together: without both, no token is issued. Only one of them → 400. `aud` must be a bare host name; `nonce` must be 8–128 chars of `[A-Za-z0-9._~-]`.
 - Signing not configured → 503; `aud` outside `RISK_TOKEN_AUDIENCES` → 403; 403 also when:
@@ -465,6 +472,15 @@ Limits: submitted passwords are not recoverable (only their length and a truncat
 - Dan.me.uk Tor lists
 - Spamhaus DROP (IPv4 + IPv6), AbuseIPDB (confidence 100, 30d mirror), Binary Defense, StopForumSpam toxic CIDRs
 - Public proxy lists (monosans, TheSpeedX), flag-only (`isProxy`)
+
+### Trusted sources (`isTrustedBot`)
+From [sefinek/trusted-ips-whitelist](https://github.com/sefinek/trusted-ips-whitelist) (synced from each vendor's official list every 6 hours); only ranges officially published and dedicated to the service:
+- Search engines: googlebot, google-special-crawlers, bingbot, applebot, duckduckbot
+- AI crawlers: gptbot, oai-searchbot, claudebot, perplexitybot
+- Monitoring: uptimerobot, pingdombot, betterstack, pulsetic
+- Payment webhooks: stripewebhook, paypal, paddle
+
+User-triggered fetchers (Google user-triggered fetchers, ChatGPT-User, …, effectively proxies), ASN-derived ranges and scanners (Shodan, Censys) are excluded. To guard against a tampered mirror, a source containing a prefix broader than IPv4 /20 or IPv6 /48, or more than 4096 entries, is rejected as a whole and its last good data is kept.
 - Other open-source threat intelligence sources
 
 ### Geolocation Data Sources

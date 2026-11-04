@@ -24,15 +24,16 @@ type FetchConfig struct {
 	RetryDelay time.Duration // 线性退避基数：第 n 次重试前等待 n*RetryDelay
 }
 
-// tables 一次发布的全部查找表，整体原子替换以保证查询时三者一致
+// tables 一次发布的全部查找表，整体原子替换以保证查询时各表一致
 type tables struct {
-	risk  *ipset.Set // 风险前缀 → 来源 ID
-	proxy *ipset.Set // 代理标记前缀 → 来源 ID
-	idc   *ipset.Set // IDC 标记前缀 → 来源 ID
+	risk    *ipset.Set // 风险前缀 → 来源 ID
+	proxy   *ipset.Set // 代理标记前缀 → 来源 ID
+	idc     *ipset.Set // IDC 标记前缀 → 来源 ID
+	trusted *ipset.Set // 可信前缀 → 来源 ID（提供方名称）
 }
 
 func emptyTables() *tables {
-	return &tables{risk: ipset.New(), proxy: ipset.New(), idc: ipset.New()}
+	return &tables{risk: ipset.New(), proxy: ipset.New(), idc: ipset.New(), trusted: ipset.New()}
 }
 
 // batch 同一数据源的数据及其属性
@@ -41,6 +42,11 @@ type batch struct {
 	data    *feedData
 	tags    Tag
 	tagOnly bool
+	trusted bool
+}
+
+func newBatch(feed Feed, data *feedData) batch {
+	return batch{source: feed.ID, data: data, tags: feed.Tags, tagOnly: feed.TagOnly, trusted: feed.Trusted}
 }
 
 // Store 维护风险前缀表与代理/IDC 标记表。查询无锁（atomic.Pointer 发布只读表），
@@ -91,6 +97,16 @@ func (s *Store) Tags(ip string) Tag {
 	return tags
 }
 
+// Trusted 返回 IP 命中的可信来源 ID（如 googlebot）；命中时调用方不应将其判定为风险
+func (s *Store) Trusted(ip string) (source string, ok bool) {
+	return s.set.Load().trusted.Lookup(ip)
+}
+
+// TrustedLen 可信表的前缀数量
+func (s *Store) TrustedLen() int {
+	return s.set.Load().trusted.Len()
+}
+
 // Snapshot 返回当前只读风险表（用于导出与统计）
 func (s *Store) Snapshot() *ipset.Set {
 	return s.set.Load().risk
@@ -127,6 +143,12 @@ func (s *Store) replace(batches []batch) {
 	next := emptyTables()
 	singleIPs, cidrs := 0, 0
 	for _, b := range batches {
+		if b.trusted {
+			for _, p := range b.data.prefixes {
+				next.trusted.InsertPrefix(p, b.source)
+			}
+			continue
+		}
 		if !b.tagOnly {
 			cidrs += b.data.cidrs
 			singleIPs += len(b.data.prefixes) - b.data.cidrs
@@ -147,7 +169,7 @@ func (s *Store) replace(batches []batch) {
 	s.set.Store(next)
 	s.writeMu.Unlock()
 	s.log.Info("risk list updated", "single_ips", singleIPs, "cidrs", cidrs, "unique_prefixes", next.risk.Len(),
-		"proxy_prefixes", next.proxy.Len(), "idc_prefixes", next.idc.Len())
+		"proxy_prefixes", next.proxy.Len(), "idc_prefixes", next.idc.Len(), "trusted_prefixes", next.trusted.Len())
 }
 
 // Clear 清空风险表与标记表
@@ -157,7 +179,7 @@ func (s *Store) Clear() {
 	s.set.Store(emptyTables())
 }
 
-// Remove 从风险表与标记表中删除单个 IP 或 CIDR（写时复制后整体替换），返回是否有表删除成功
+// Remove 从风险表与标记表中删除单个 IP 或 CIDR（写时复制后整体替换），返回是否有表删除成功；可信表不受影响
 func (s *Store) Remove(entry string) bool {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -167,7 +189,7 @@ func (s *Store) Remove(entry string) bool {
 	idc, r3 := cur.idc.Without(entry)
 	removed := r1 || r2 || r3
 	if removed {
-		s.set.Store(&tables{risk: risk, proxy: proxy, idc: idc})
+		s.set.Store(&tables{risk: risk, proxy: proxy, idc: idc, trusted: cur.trusted})
 	}
 	return removed
 }
@@ -249,7 +271,7 @@ func (s *Store) Update(ctx context.Context) bool {
 			continue
 		}
 		data := s.lastGood[feed.ID]
-		batches = append(batches, batch{source: feed.ID, data: data, tags: feed.Tags, tagOnly: feed.TagOnly})
+		batches = append(batches, newBatch(feed, data))
 		total += len(data.prefixes)
 	}
 	s.log.Info("risk list sources", "fresh", fresh, "unchanged", unchanged, "stale", stale, "unavailable", missing, "entries", total)
