@@ -59,6 +59,41 @@ func TestClientIP_HonorsHeadersFromTrustedPeer(t *testing.T) {
 	assert.Equal(t, "1.2.3.4", clientIPOf(env, "104.16.0.1:1234", map[string]string{"CF-Connecting-IP": "1.2.3.4"}))
 }
 
+func TestClientIP_CloudFrontViewerAddress(t *testing.T) {
+	env := newTestEnv(t)
+	cases := map[string]string{
+		"1.2.3.4:46532":       "1.2.3.4",
+		"2001:db8::1:46532":   "2001:db8::1",
+		"[2001:db8::1]:46532": "2001:db8::1",
+		"not-an-ip:1":         "10.1.2.3",
+		"1.2.3.4":             "1.2.3.4", // 无端口的 IPv4 也接受
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, clientIPOf(env, "10.1.2.3:1234", map[string]string{"CloudFront-Viewer-Address": in}), in)
+	}
+	// 链路 CloudFront → Cloudflare 时 CF-Connecting-IP 是 CloudFront 节点 IP，必须让位
+	assert.Equal(t, "1.2.3.4", clientIPOf(env, "10.1.2.3:1234", map[string]string{
+		"CloudFront-Viewer-Address": "1.2.3.4:46532",
+		"CF-Connecting-IP":          "64.252.83.221",
+	}))
+}
+
+// 生产链路 AxisNow → CloudFront → Cloudflare(Koyeb) → Koyeb，CloudFront 未开 CloudFront-Viewer-Address：
+// CF-Connecting-IP 是 CloudFront 回源节点，真实 IP 只在 X-Forwarded-For 里
+func TestClientIP_SkipsFrontCDNNodeInHeaders(t *testing.T) {
+	env := newTestEnv(t)
+	assert.Equal(t, "1.2.3.4", clientIPOf(env, "10.1.2.3:1234", map[string]string{
+		"CF-Connecting-IP": "64.252.83.221",
+		"X-Forwarded-For":  "6.6.6.6, 1.2.3.4, 64.252.83.221",
+	}))
+	assert.Equal(t, "2001:db8:1::1", clientIPOf(env, "10.1.2.3:1234", map[string]string{
+		"CF-Connecting-IP": "2600:9000:26bf:4800:8:792e:94c0:93a1",
+		"X-Forwarded-For":  "2001:db8:1::1, 2600:9000:26bf:4800:8:792e:94c0:93a1",
+	}))
+	// CloudFront 节点作为直连对端同样可信
+	assert.Equal(t, "1.2.3.4", clientIPOf(env, "64.252.83.221:1234", map[string]string{"X-Forwarded-For": "1.2.3.4"}))
+}
+
 func TestClientIP_ForwardedForUsesRightmostUntrusted(t *testing.T) {
 	env := newTestEnv(t)
 	// 最左侧是客户端伪造的值，真实来源是代理追加的最右侧不可信地址

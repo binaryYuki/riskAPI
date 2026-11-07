@@ -12,16 +12,34 @@ import (
 )
 
 // 仅在直连对端可信时才读取的单值请求头（由 CDN/代理覆写，不可追加）。
-// 顺序即优先级：生产链路为 EdgeOne → Cloudflare(Koyeb 边缘) → Koyeb，
-// CF-Connecting-IP 是 EdgeOne 节点 IP，必须排在 EO-Client-IP 之后。
+// 顺序即优先级：前置 CDN（EdgeOne、CloudFront，经 AxisNow 多 CDN 调度）→ Cloudflare(Koyeb 边缘) → Koyeb，
+// 此时 CF-Connecting-IP 是前置 CDN 的节点 IP，所以前置 CDN 的头必须排在它之前。
+// 值本身落在已知 CDN 网段的头会被跳过（见 clientIP），前置 CDN 没带专属头时回退到 X-Forwarded-For。
 var clientIPHeaders = []string{
-	"EO-Client-IP",       // EdgeOne
-	"CF-Connecting-IP",   // Cloudflare
-	"True-Client-IP",     // Akamai / Cloudflare
-	"Fastly-Client-IP",   // Fastly
-	"ali-real-client-ip", // 阿里云 ESA
-	"X-Azure-ClientIP",   // Azure Front Door
-	"X-Real-IP",          // Nginx
+	"EO-Client-IP",              // EdgeOne
+	"CloudFront-Viewer-Address", // Amazon CloudFront，值为 "IP:端口"，见 headerIP
+	"CF-Connecting-IP",          // Cloudflare
+	"True-Client-IP",            // Akamai / Cloudflare
+	"Fastly-Client-IP",          // Fastly
+	"ali-real-client-ip",        // 阿里云 ESA
+	"X-Azure-ClientIP",          // Azure Front Door
+	"X-Real-IP",                 // Nginx
+}
+
+// headerIP 读取单值头中的客户端 IP。
+// CloudFront-Viewer-Address 形如 "198.51.100.10:46532" 或 "2001:db8::1:46532"（IPv6 不带方括号），
+// 需去掉最后一个冒号后的端口；其余头为纯 IP。
+func headerIP(header, value string) string {
+	value = strings.TrimSpace(value)
+	if header == "CloudFront-Viewer-Address" {
+		if i := strings.LastIndexByte(value, ':'); i > 0 {
+			value = strings.TrimSuffix(strings.TrimPrefix(value[:i], "["), "]")
+		}
+	}
+	if isValidIP(value) {
+		return value
+	}
+	return ""
 }
 
 func parsePrefixes(items []string, log *slog.Logger) []netip.Prefix {
@@ -51,19 +69,25 @@ func (s *Server) isTrustedProxy(ip string) bool {
 			return true
 		}
 	}
-	_, isCDN := s.lists.CDN(addr.String())
-	return isCDN
+	return s.isCDN(addr.String())
+}
+
+// isCDN 判断 IP 是否落在已知 CDN 网段
+func (s *Server) isCDN(ip string) bool {
+	_, ok := s.lists.CDN(ip)
+	return ok
 }
 
 // clientIP 解析真实客户端 IP。
 // 只有直连对端是可信代理时才读取转发头，否则直接使用对端地址，防止客户端伪造请求头冒充任意 IP。
+// 头里的值若是已知 CDN 节点，说明它记录的是前置 CDN 这一跳而不是用户，跳过继续往下找。
 func (s *Server) clientIP(c *gin.Context) string {
 	peer := c.RemoteIP()
 	if !s.isTrustedProxy(peer) {
 		return peer
 	}
 	for _, header := range clientIPHeaders {
-		if ip := strings.TrimSpace(c.GetHeader(header)); isValidIP(ip) {
+		if ip := headerIP(header, c.GetHeader(header)); ip != "" && !s.isCDN(ip) {
 			return ip
 		}
 	}
