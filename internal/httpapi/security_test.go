@@ -78,10 +78,14 @@ func TestClientIP_CloudFrontViewerAddress(t *testing.T) {
 	}))
 }
 
-// 生产链路 AxisNow → CloudFront → Cloudflare(Koyeb) → Koyeb，CloudFront 未开 CloudFront-Viewer-Address：
-// CF-Connecting-IP 是 CloudFront 回源节点，真实 IP 只在 X-Forwarded-For 里
+// 生产链路 AxisNow(CloudFront) → nginx → 容器，CloudFront 未开 CloudFront-Viewer-Address：
+// 单值头（X-Real-IP / CF-Connecting-IP）是 CloudFront 回源节点，真实 IP 只在 X-Forwarded-For 里
 func TestClientIP_SkipsFrontCDNNodeInHeaders(t *testing.T) {
 	env := newTestEnv(t)
+	assert.Equal(t, "1.2.3.4", clientIPOf(env, "10.1.2.3:1234", map[string]string{
+		"X-Real-IP":       "64.252.83.221",
+		"X-Forwarded-For": "6.6.6.6, 1.2.3.4, 64.252.83.221",
+	}))
 	assert.Equal(t, "1.2.3.4", clientIPOf(env, "10.1.2.3:1234", map[string]string{
 		"CF-Connecting-IP": "64.252.83.221",
 		"X-Forwarded-For":  "6.6.6.6, 1.2.3.4, 64.252.83.221",
