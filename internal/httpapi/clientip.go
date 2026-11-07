@@ -12,9 +12,11 @@ import (
 )
 
 // 仅在直连对端可信时才读取的单值请求头（由 CDN/代理覆写，不可追加）。
-// 顺序即优先级：CDN 专属头在前，通用头（X-Real-IP 等）在后。CDN 叠加时（前置 CDN → 另一层 CDN），
-// 后一层写的 CF-Connecting-IP 等是前置 CDN 的节点 IP，所以前置 CDN 的头必须排在它之前。
-// 值本身落在已知 CDN 网段的头会被跳过（见 clientIP），前置 CDN 没带专属头时回退到 X-Forwarded-For。
+// 生产链路：CDN（EdgeOne / ESA / CloudFront）→ Envoy Gateway → Pod，对端是 Envoy Pod（私网，默认可信）。
+// 顺序即优先级：CDN 专属头在前，通用头（X-Real-IP 等）在后；CDN 叠加时下一层写的头是前置 CDN 的节点 IP，
+// 所以前置 CDN 的头必须排在前面。值本身落在已知 CDN 网段的头会被跳过（见 clientIP）。
+// CDN 没带专属头时（如 CloudFront 未开 CloudFront-Viewer-Address）回退到 X-Forwarded-For：
+// Envoy 会把它看到的对端（CDN 节点）追加到末尾，从右往左跳过可信代理和 CDN 网段即得用户 IP。
 var clientIPHeaders = []string{
 	"EO-Client-IP",              // EdgeOne
 	"CloudFront-Viewer-Address", // Amazon CloudFront，值为 "IP:端口"，见 headerIP

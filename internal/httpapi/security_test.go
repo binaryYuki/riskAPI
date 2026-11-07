@@ -78,21 +78,29 @@ func TestClientIP_CloudFrontViewerAddress(t *testing.T) {
 	}))
 }
 
-// 生产链路 AxisNow(CloudFront) → nginx → 容器，CloudFront 未开 CloudFront-Viewer-Address：
-// 单值头（X-Real-IP / CF-Connecting-IP）是 CloudFront 回源节点，真实 IP 只在 X-Forwarded-For 里
-func TestClientIP_SkipsFrontCDNNodeInHeaders(t *testing.T) {
+// 生产链路 CDN(CloudFront) → Envoy Gateway → Pod：对端是 Envoy Pod，没有任何单值头，
+// CloudFront 把用户 IP 追加进 XFF，Envoy 再追加它看到的对端（CloudFront 节点，SNAT 时为节点内网 IP）
+func TestClientIP_EnvoyBehindCloudFront(t *testing.T) {
 	env := newTestEnv(t)
-	assert.Equal(t, "1.2.3.4", clientIPOf(env, "10.1.2.3:1234", map[string]string{
-		"X-Real-IP":       "64.252.83.221",
+	const envoyPod = "10.42.0.17:41234"
+	assert.Equal(t, "1.2.3.4", clientIPOf(env, envoyPod, map[string]string{
 		"X-Forwarded-For": "6.6.6.6, 1.2.3.4, 64.252.83.221",
 	}))
-	assert.Equal(t, "1.2.3.4", clientIPOf(env, "10.1.2.3:1234", map[string]string{
-		"CF-Connecting-IP": "64.252.83.221",
-		"X-Forwarded-For":  "6.6.6.6, 1.2.3.4, 64.252.83.221",
+	assert.Equal(t, "2001:db8:1::1", clientIPOf(env, envoyPod, map[string]string{
+		"X-Forwarded-For": "2001:db8:1::1, 2600:9000:26bf:4800:8:792e:94c0:93a1",
 	}))
-	assert.Equal(t, "2001:db8:1::1", clientIPOf(env, "10.1.2.3:1234", map[string]string{
-		"CF-Connecting-IP": "2600:9000:26bf:4800:8:792e:94c0:93a1",
-		"X-Forwarded-For":  "2001:db8:1::1, 2600:9000:26bf:4800:8:792e:94c0:93a1",
+	// svclb externalTrafficPolicy: Cluster 被 SNAT，Envoy 追加的是节点内网 IP，结果不变
+	assert.Equal(t, "1.2.3.4", clientIPOf(env, envoyPod, map[string]string{
+		"X-Forwarded-For": "6.6.6.6, 1.2.3.4, 10.42.0.1",
+	}))
+}
+
+// 单值头的值若是已知 CDN 节点（CDN 叠加时下一层把前置 CDN 节点写进头里），跳过并回退 XFF
+func TestClientIP_SkipsCDNNodeInSingleValueHeader(t *testing.T) {
+	env := newTestEnv(t)
+	assert.Equal(t, "1.2.3.4", clientIPOf(env, "10.42.0.17:41234", map[string]string{
+		"CF-Connecting-IP": "64.252.83.221",
+		"X-Forwarded-For":  "1.2.3.4, 64.252.83.221",
 	}))
 	// CloudFront 节点作为直连对端同样可信
 	assert.Equal(t, "1.2.3.4", clientIPOf(env, "64.252.83.221:1234", map[string]string{"X-Forwarded-For": "1.2.3.4"}))
