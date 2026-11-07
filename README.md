@@ -324,7 +324,7 @@ The script response is CDN-cacheable: `Cache-Control: public, max-age=600, s-max
 ### 4. CDN/IDC Query (New Feature)
 ```bash
 # Query specific CDN IP ranges
-GET /cdn/{provider}  # cloudflare, fastly, edgeone
+GET /cdn/{provider}  # cloudflare, fastly, edgeone, cloudfront
 
 # Query all CDN information
 GET /cdn/all
