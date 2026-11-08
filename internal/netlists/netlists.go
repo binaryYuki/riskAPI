@@ -15,7 +15,7 @@ import (
 
 // 提供商顺序即同一前缀出现在多家时的优先级
 var (
-	CDNProviders = []string{"edgeone", "cloudflare", "fastly", "cloudfront"}
+	CDNProviders = []string{"edgeone", "cloudflare", "fastly", "cloudfront", "axisnow"}
 	IDCProviders = []string{"aws", "azure", "gcp", "akamai", "apple", "digitalocean", "linode", "oracle", "zscaler"}
 	// ProxyProviders IDC 中实为代理/中继出口的提供商（apple.txt 即 iCloud Private Relay 出口段）
 	ProxyProviders = []string{"apple"}

@@ -328,7 +328,7 @@ GET  /api/v1/webrtc   # 浏览器脚本
 ### 4. CDN/IDC查询 (新功能)
 ```bash
 # 查询指定CDN的IP范围
-GET /cdn/{provider}  # cloudflare, fastly, edgeone, cloudfront
+GET /cdn/{provider}  # cloudflare, fastly, edgeone, cloudfront, axisnow
 
 # 查询所有CDN信息
 GET /cdn/all
