@@ -122,6 +122,18 @@ func TestClientIP_EnvoyBehindCloudFront(t *testing.T) {
 	}))
 }
 
+// 经 Dream Cloud 边缘节点回源：不带任何单值头，XFF 末尾是节点自身（入口出口同一地址，经 Cloudflare 宣告但不在 Cloudflare 网段内）
+func TestClientIP_EnvoyBehindDreamCloudEdge(t *testing.T) {
+	env := newTestEnv(t)
+	assert.Equal(t, "120.230.60.88", clientIPOf(env, "10.42.0.185:41234", map[string]string{
+		"X-Forwarded-For": "120.230.60.88,203.168.131.145",
+	}))
+	// 客户端在左侧伪造的条目不影响结果
+	assert.Equal(t, "120.230.60.88", clientIPOf(env, "10.42.0.185:41234", map[string]string{
+		"X-Forwarded-For": "6.6.6.6, 120.230.60.88,203.168.131.145",
+	}))
+}
+
 // 单值头的值若是已知 CDN 节点（CDN 叠加时下一层把前置 CDN 节点写进头里），跳过并回退 XFF
 func TestClientIP_SkipsCDNNodeInSingleValueHeader(t *testing.T) {
 	env := newTestEnv(t)

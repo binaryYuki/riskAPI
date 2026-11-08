@@ -1,0 +1,4 @@
+# DREAM CLOUD INNOVATION PTE. LTD.（APNIC inetnum DCIPL-SG，route 203.168.131.0/24 origin AS135074，
+# 经 Cloudflare 宣告，IP 库常显示为 AS13335）。多 CDN 调度到的边缘节点（server: Edge/1.1.35），
+# 回源不带专属客户端 IP 头，只把自身追加进 X-Forwarded-For，出入口为同一地址。
+203.168.130.0/23
