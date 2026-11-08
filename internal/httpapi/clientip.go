@@ -20,11 +20,11 @@ import (
 var clientIPHeaders = []string{
 	"EO-Client-IP",              // EdgeOne
 	"CloudFront-Viewer-Address", // Amazon CloudFront，值为 "IP:端口"，见 headerIP
-	"CF-Connecting-IP",          // Cloudflare
 	"True-Client-IP",            // Akamai / Cloudflare
 	"Fastly-Client-IP",          // Fastly
 	"ali-real-client-ip",        // 阿里云 ESA
 	"X-Azure-ClientIP",          // Azure Front Door
+	"CF-Connecting-IP",          // Cloudflare
 	"X-Real-IP",                 // Nginx
 }
 
