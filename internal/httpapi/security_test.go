@@ -122,15 +122,21 @@ func TestClientIP_EnvoyBehindCloudFront(t *testing.T) {
 	}))
 }
 
-// 经 Dream Cloud 边缘节点回源：不带任何单值头，XFF 末尾是节点自身（入口出口同一地址，经 Cloudflare 宣告但不在 Cloudflare 网段内）
-func TestClientIP_EnvoyBehindDreamCloudEdge(t *testing.T) {
+// 经 AxisNow 调度的边缘节点回源（例如 DreamCloud 203.168.131.145）：不带任何单值头，XFF 末尾是节点自身
+func TestClientIP_EnvoyBehindAxisNowEdge(t *testing.T) {
 	env := newTestEnv(t)
-	assert.Equal(t, "120.230.60.88", clientIPOf(env, "10.42.0.185:41234", map[string]string{
-		"X-Forwarded-For": "120.230.60.88,203.168.131.145",
-	}))
-	// 客户端在左侧伪造的条目不影响结果
-	assert.Equal(t, "120.230.60.88", clientIPOf(env, "10.42.0.185:41234", map[string]string{
-		"X-Forwarded-For": "6.6.6.6, 120.230.60.88,203.168.131.145",
+	for _, edge := range []string{"203.168.131.145", "156.239.232.8", "35.253.153.92"} {
+		assert.Equal(t, "120.230.60.88", clientIPOf(env, "10.42.0.185:41234", map[string]string{
+			"X-Forwarded-For": "120.230.60.88," + edge,
+		}), edge)
+		// 客户端在左侧伪造的条目不影响结果
+		assert.Equal(t, "120.230.60.88", clientIPOf(env, "10.42.0.185:41234", map[string]string{
+			"X-Forwarded-For": "6.6.6.6, 120.230.60.88," + edge,
+		}), edge)
+	}
+	// 只收录 /32：同一注册段的相邻地址不可信
+	assert.Equal(t, "203.168.131.146", clientIPOf(env, "10.42.0.185:41234", map[string]string{
+		"X-Forwarded-For": "120.230.60.88,203.168.131.146",
 	}))
 }
 
