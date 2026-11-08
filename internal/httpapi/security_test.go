@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -50,13 +51,39 @@ func TestClientIP_IgnoresSpoofedHeadersFromUntrustedPeer(t *testing.T) {
 func TestClientIP_HonorsHeadersFromTrustedPeer(t *testing.T) {
 	env := newTestEnv(t)
 	assert.Equal(t, "1.2.3.4", clientIPOf(env, "10.1.2.3:1234", map[string]string{"CF-Connecting-IP": "1.2.3.4"}))
-	// EO-Client-IP 优先于 CF-Connecting-IP（生产链路 EdgeOne → Cloudflare）
+	// CDN 专属头优先于 CF-Connecting-IP
 	assert.Equal(t, "1.2.3.4", clientIPOf(env, "10.1.2.3:1234", map[string]string{
 		"EO-Client-IP":     "1.2.3.4",
 		"CF-Connecting-IP": "5.6.7.8",
 	}))
 	// 已知 CDN 网段的对端同样可信
 	assert.Equal(t, "1.2.3.4", clientIPOf(env, "104.16.0.1:1234", map[string]string{"CF-Connecting-IP": "1.2.3.4"}))
+}
+
+// 单值头的优先级：CDN 专属头在前，CF-Connecting-IP 与通用的 X-Real-IP 垫底。
+// 顺序在此写死，改动 clientIPHeaders 的顺序时须同步这里。
+func TestClientIP_HeaderPriority(t *testing.T) {
+	env := newTestEnv(t)
+	order := []string{
+		"EO-Client-IP",
+		"CloudFront-Viewer-Address",
+		"True-Client-IP",
+		"Fastly-Client-IP",
+		"ali-real-client-ip",
+		"X-Azure-ClientIP",
+		"CF-Connecting-IP",
+		"X-Real-IP",
+	}
+	require.Equal(t, order, clientIPHeaders)
+	headers := make(map[string]string, len(order))
+	for i, h := range order {
+		headers[h] = fmt.Sprintf("1.2.3.%d", i+1)
+	}
+	headers["CloudFront-Viewer-Address"] += ":46532"
+	for i, h := range order {
+		assert.Equal(t, fmt.Sprintf("1.2.3.%d", i+1), clientIPOf(env, "10.42.0.17:41234", headers), "%s should win", h)
+		delete(headers, h)
+	}
 }
 
 func TestClientIP_CloudFrontViewerAddress(t *testing.T) {
