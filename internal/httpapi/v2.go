@@ -27,13 +27,15 @@ type SignedIPResponse struct {
 
 // SignedInfoResponse /api/v2/info 响应：地理位置 + 风险判定 + 签名令牌
 type SignedInfoResponse struct {
-	Status  string         `json:"status"`
-	IP      string         `json:"ip"`
-	IsRisky bool           `json:"isRisky"`
-	IsIDC   bool           `json:"isIdc"`
-	IsProxy bool           `json:"isProxy"`
-	Results map[string]any `json:"results"`
-	Token   string         `json:"token,omitempty"`
+	Status  string `json:"status"`
+	IP      string `json:"ip"`
+	IsRisky bool   `json:"isRisky"`
+	IsIDC   bool   `json:"isIdc"`
+	IsProxy bool   `json:"isProxy"`
+	// TrustedBot 同 ResponseWithIP.TrustedBot
+	TrustedBot string         `json:"isTrustedBot,omitempty"`
+	Results    map[string]any `json:"results"`
+	Token      string         `json:"token,omitempty"`
 }
 
 // tokenRequest 解析后的签名参数；want 为 false 时不签发令牌
@@ -79,13 +81,14 @@ func (s *Server) sign(req tokenRequest, resp ResponseWithIP) string {
 		return ""
 	}
 	token, _ := s.signer.Sign(risktoken.Claims{
-		IP:      resp.IP,
-		Status:  resp.Status,
-		IsRisky: resp.IsRisky,
-		IsIDC:   resp.IsIDC,
-		IsProxy: resp.IsProxy,
-		Aud:     req.aud,
-		Nonce:   req.nonce,
+		IP:         resp.IP,
+		Status:     resp.Status,
+		IsRisky:    resp.IsRisky,
+		IsIDC:      resp.IsIDC,
+		IsProxy:    resp.IsProxy,
+		TrustedBot: resp.TrustedBot,
+		Aud:        req.aud,
+		Nonce:      req.nonce,
 	})
 	return token
 }
@@ -133,13 +136,14 @@ func (s *Server) ipInfoV2(c *gin.Context) {
 		}
 	}
 	c.IndentedJSON(http.StatusOK, SignedInfoResponse{
-		Status:  "ok",
-		IP:      ip,
-		IsRisky: verdict.IsRisky,
-		IsIDC:   verdict.IsIDC,
-		IsProxy: verdict.IsProxy,
-		Results: results,
-		Token:   s.sign(req, verdict),
+		Status:     "ok",
+		IP:         ip,
+		IsRisky:    verdict.IsRisky,
+		IsIDC:      verdict.IsIDC,
+		IsProxy:    verdict.IsProxy,
+		TrustedBot: verdict.TrustedBot,
+		Results:    results,
+		Token:      s.sign(req, verdict),
 	})
 }
 

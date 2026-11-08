@@ -177,7 +177,7 @@ func (s *Store) applySnapshot(snap snapshot) bool {
 			continue
 		}
 		lastGood[feed.ID] = data
-		batches = append(batches, batch{source: feed.ID, data: data, tags: feed.Tags, tagOnly: feed.TagOnly})
+		batches = append(batches, newBatch(feed, data))
 	}
 	if len(batches) == 0 {
 		return false

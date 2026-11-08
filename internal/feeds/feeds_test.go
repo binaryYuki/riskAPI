@@ -431,7 +431,7 @@ func TestDefaultFeeds_UniqueIDsAndURLs(t *testing.T) {
 		assert.False(t, urls[f.URL], "duplicate url %s", f.URL)
 		ids[f.ID], urls[f.URL] = true, true
 	}
-	assert.Len(t, DefaultFeeds, 32)
+	assert.Len(t, DefaultFeeds, 48)
 }
 
 // ipsum 低级别是高级别的超集，必须升序排列，否则高级别标签会被低级别覆盖

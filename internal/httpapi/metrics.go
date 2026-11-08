@@ -44,6 +44,7 @@ func (s *Server) metricsPrometheus(c *gin.Context) {
 	metric("riskapi_build_info", "gauge", "Build information.", 1, fmt.Sprintf("version=%q", s.version))
 	metric("riskapi_ready", "gauge", "Whether risk IP lists have completed their first load.", boolGauge(s.risk.Ready()))
 	metric("riskapi_risk_prefixes", "gauge", "Unique prefixes in the risk IP table.", s.risk.Snapshot().Len())
+	metric("riskapi_trusted_prefixes", "gauge", "Unique prefixes in the trusted bot table.", s.risk.TrustedLen())
 	metric("riskapi_cdn_prefixes", "gauge", "Prefixes in the CDN table.", cdn)
 	metric("riskapi_idc_prefixes", "gauge", "Prefixes in the IDC table.", idc)
 	metric("riskapi_info_cache_entries", "gauge", "Entries in the /api/v1/info cache.", s.infoCache.Len())

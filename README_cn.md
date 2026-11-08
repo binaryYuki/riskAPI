@@ -175,6 +175,13 @@ GET /api/v1/ip
 
 `isRisky` 在命中风险列表或被本服务蜜罐标记（来源名为 `honeytrap`，可用 `HONEYTRAP_AFFECTS_VERDICT=false` 关闭）时为 true。`isIdc` / `isProxy` 是独立标记：`isIdc` 来自 data/idc 云厂商网段与数据中心类数据源；`isProxy` 来自 VPN/Tor/iCloud Private Relay 与公开代理列表（公开代理只打标记，不判定为风险）。
 
+`isTrustedBot` 仅在命中可信来源时出现，值为提供方名称（如 `googlebot`、`bingbot`、`stripewebhook`）。可信来源是厂商官方公布的搜索引擎/AI 爬虫、监控探针与支付回调网段，命中时 `isRisky` 一律为 false（机房类风险源与蜜罐标记都不生效），`status` 与 `isIdc` / `isProxy` 照常给出：
+
+```json
+{ "status": "idc", "message": "IP belongs to IDC: gcp", "ip": "34.22.85.1",
+  "isRisky": false, "isIdc": true, "isProxy": false, "isTrustedBot": "googlebot" }
+```
+
 ### 1.1 签名结果 (v2)
 ```bash
 # 请求方 IP 风险判定，带签名
@@ -187,7 +194,7 @@ GET /api/v2/info?aud={接入站点域名}&nonce={一次性随机串}
 GET /.well-known/risk-keys.json
 ```
 
-浏览器请求 v2，把 `token` 原样转交给接入站点的服务端，服务端用公布的公钥验签；任何字段被篡改签名都会失效。v2 响应为 v1 的内容加上 `token`（`/api/v2/info` 还带 `isRisky` / `isIdc` / `isProxy`）：
+浏览器请求 v2，把 `token` 原样转交给接入站点的服务端，服务端用公布的公钥验签；任何字段被篡改签名都会失效。v2 响应为 v1 的内容加上 `token`（`/api/v2/info` 还带 `isRisky` / `isIdc` / `isProxy` / `isTrustedBot`）：
 
 ```json
 {
@@ -204,7 +211,7 @@ GET /.well-known/risk-keys.json
   "aud": "gdue-ca.paperee.guru", "nonce": "…", "iat": 1791979000, "exp": 1791979120 }
 ```
 
-接入方需校验：签名（按 `kid` 选公钥）、`exp`、`aud` 等于本站域名、`nonce` 是本站下发且未使用过的、`ip` 与本站看到的访客 IP 一致（IPv6 按 /64 比较）。
+命中可信来源时 payload 在 `isProxy` 之后多一个 `"isTrustedBot": "googlebot"`，其余情况省略。接入方需校验：签名（按 `kid` 选公钥）、`exp`、`aud` 等于本站域名、`nonce` 是本站下发且未使用过的、`ip` 与本站看到的访客 IP 一致（IPv6 按 /64 比较）。
 
 - `aud` 与 `nonce` 要么都带、要么都不带：都不带时不签发令牌；只带其一返回 400。`aud` 必须是纯域名；`nonce` 为 8～128 位 `[A-Za-z0-9._~-]`。
 - 未配置签名返回 503；`aud` 不在 `RISK_TOKEN_AUDIENCES` 中返回 403；以下情况返回 403：
@@ -462,6 +469,15 @@ GET /api/honeytrap/source/{id}`（需要管理令牌）。
 - Spamhaus DROP（IPv4 + IPv6）、AbuseIPDB（置信度 100、30 天镜像）、Binary Defense、StopForumSpam 滥用网段
 - 公开代理列表（monosans、TheSpeedX），仅标记 `isProxy`
 - 其他开源威胁情报源
+
+### 可信来源 (`isTrustedBot`)
+取自 [sefinek/trusted-ips-whitelist](https://github.com/sefinek/trusted-ips-whitelist)（每 6 小时从各厂商官方地址同步），只收录官方公布、专属于该服务的网段：
+- 搜索引擎：googlebot、google-special-crawlers、bingbot、applebot、duckduckbot
+- AI 爬虫：gptbot、oai-searchbot、claudebot、perplexitybot
+- 监控：uptimerobot、pingdombot、betterstack、pulsetic
+- 支付回调：stripewebhook、paypal、paddle
+
+代用户抓取的 fetcher（Google user-triggered fetchers、ChatGPT-User 等，本质是代理）、按 ASN 推算的整段与扫描器（Shodan、Censys）不收录。为防止镜像被篡改，出现宽于 IPv4 /20、IPv6 /48 的前缀或单源超过 4096 条时整源拒收，沿用上次数据。
 
 ### 地理位置数据源
 - **MaxMind GeoLite2**: 全球覆盖，准确度较高
