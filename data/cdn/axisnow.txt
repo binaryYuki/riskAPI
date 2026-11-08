@@ -3,7 +3,7 @@
 # 所以要列进 CDN 网段，XFF 从右往左解析时才会跳过它们。
 # 只按 /32 精确收录：所属注册段大多是公有云或 VPS 段（如 Google 136.64.0.0/11），
 # 整段收录会让同段任意主机都能伪造 XFF。
-# 控制台里只有 CNAME、没有可见 EIP 的厂商（CloudLeadinno、DeepEdge）暂未收录。
+# 控制台里只有 CNAME 的厂商（CloudLeadinno、DeepEdge）按拨测目标 CNAME 的解析结果收录，节点变了要重新解析。
 
 # StarVM（cloudinnovation.org）
 156.239.232.72/32
@@ -20,6 +20,13 @@
 
 # cloudbays（iens.com，IENS TECHNOLOGY）
 43.248.172.135/32
+
+# CloudLeadinno（d05d79d8.alidns-2.com 的解析结果，103.250.172.0/22 已转到 RIPE 区）
+103.250.172.189/32
+
+# DeepEdge（deepedge-free.alidns-2.com 的解析结果，托管在 DREAM CLOUD INNOVATION）
+222.167.34.27/32
+103.204.13.134/32
 
 # AxisNow 自有节点（Google Cloud）
 136.85.52.129/32
