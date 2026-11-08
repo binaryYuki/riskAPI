@@ -367,6 +367,12 @@ GET /api/cache/flush
 
 # Flush specific cache
 POST /api/cache/flush/{method}/{range}
+
+# Debug client IP resolution: shows the peer, each candidate header (and whether its value is in a
+# known CDN range), every X-Forwarded-For hop, the resolved client_ip with its source (header name /
+# X-Forwarded-For / peer / peer-fallback) and all request headers (Authorization and Cookie redacted).
+# Call it through the CDN path you are debugging
+GET /api/debug/clientip
 ```
 
 ### 7. Honeypot Log Lookup

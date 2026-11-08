@@ -84,19 +84,32 @@ func (s *Server) isCDN(ip string) bool {
 // 只有直连对端是可信代理时才读取转发头，否则直接使用对端地址，防止客户端伪造请求头冒充任意 IP。
 // 头里的值若是已知 CDN 节点，说明它记录的是前置 CDN 这一跳而不是用户，跳过继续往下找。
 func (s *Server) clientIP(c *gin.Context) string {
+	ip, _ := s.resolveClientIP(c)
+	return ip
+}
+
+// 客户端 IP 的来源（除请求头名外），供 /api/debug/clientip 展示
+const (
+	clientIPSourcePeer         = "peer"            // 对端不可信，直接用对端地址
+	clientIPSourceForwardedFor = "X-Forwarded-For" // 单值头都不可用，回退到 XFF
+	clientIPSourcePeerFallback = "peer-fallback"   // 对端可信但所有头都不可用
+)
+
+// resolveClientIP 返回客户端 IP 及其来源：命中的请求头名，或上面的来源常量
+func (s *Server) resolveClientIP(c *gin.Context) (ip, source string) {
 	peer := c.RemoteIP()
 	if !s.isTrustedProxy(peer) {
-		return peer
+		return peer, clientIPSourcePeer
 	}
 	for _, header := range clientIPHeaders {
 		if ip := headerIP(header, c.GetHeader(header)); ip != "" && !s.isCDN(ip) {
-			return ip
+			return ip, header
 		}
 	}
 	if ip := s.clientIPFromForwardedFor(c.GetHeader("X-Forwarded-For")); ip != "" {
-		return ip
+		return ip, clientIPSourceForwardedFor
 	}
-	return peer
+	return peer, clientIPSourcePeerFallback
 }
 
 // clientIPFromForwardedFor 从右向左跳过可信代理，返回第一个不可信地址。

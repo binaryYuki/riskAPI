@@ -364,6 +364,11 @@ GET /api/cache/flush
 
 # 刷新指定缓存
 POST /api/cache/flush/{method}/{range}
+
+# 排查客户端 IP 解析：返回对端、各候选头的值（及是否落在已知 CDN 网段）、XFF 每一跳、
+# 最终 client_ip 与其来源（命中的头名 / X-Forwarded-For / peer / peer-fallback）以及全部请求头
+# （Authorization、Cookie 已脱敏）。须经要排查的 CDN 链路访问
+GET /api/debug/clientip
 ```
 
 ### 7. 蜜罐日志还原
